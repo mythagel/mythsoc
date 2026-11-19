@@ -1,5 +1,31 @@
 # progress
 
+## 2026-11-19 (session 4)
+- wb_ic + tb: ALL TESTS PASSED (25 checks: reset, 1cyc/3cyc slave push->ack latency,
+  cross-master order, decode routing, null slave, byte/SEL merge, 8-read burst
+  pipelining, no-ACK slave + per-master STALL isolation, reset mid-flight + slave
+  revive, 3cyc-slave parallelism, 450-op concurrent stress (3 LCG engines), exact
+  region re-verify + ack/push balance, FIFO unit).
+- rtl/wb_ic.v rewrite: combinational present-at-grant (slave STB+data at grant,
+  FIFO pop tied to grant; empty-FIFO STB grants the pushed word directly: push@P,
+  pop@P+1), combinational return (m_k_ACK = s_ACK & s_busy, same cycle as slave
+  ACK). Latency per design.md sec.6: 1cyc slave STB@c -> m_ACK@c+1; same-master
+  re-grant period off+2 (3 for 1cyc slave) -> 8-push burst total 24.
+- tb_wb_slv: NOACK is now a runtime input (T9 revive); DELAY=1 now ACKs at c+1
+  (sec.6: slave ACK >=1 cycle after STB; old same-cycle path violated protocol).
+  Measured: 1cyc push->ack dt=3, 3cyc dt=4, burst=24 (tools/wb_ic_latency.py).
+- tools/wb_ic_latency.py: cycle-accurate push->ack/burst/FIFO model; anchors are
+  sec.6 latency + measured dt.
+- iverilog gotcha: string labels via `task ok(input [255:0] s)` + %s print only
+  32 chars; longer literals truncate (high end) SILENTLY. All TB labels <=32;
+  guard comment at ok/err in all TBs. (Found: 4 PASS lines printed truncated.)
+- notes/design.md sec.12: 16550/clint/wb_ic marked done.
+
+## next
+- plic + tb, then mmu/tlb (walker + TLB on wb_ram), l1_i/l1_d, core, soc,
+  firmware (tests/*.S + clang build), synth (yosys/nextpnr/ecppack + fmax),
+  board (lpf/openocd/boot stub), README
+
 ## 2026-11-18 (session 3)
 - tools/addr.py (region/regmap modes). Caught: mtime regs at word 0x2FFE/0x2FFF (not 0x2FFF/0x3000).
   Verified decodes: CLINT ADR[31:16]==16'h0200, PLIC ADR[31:22]==10'h030, word idx ADR[15:2]/ADR[21:2].

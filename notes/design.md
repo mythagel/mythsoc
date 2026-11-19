@@ -117,6 +117,7 @@ IC internal design (pipelined; up to 3 transfers in flight, one per master):
 - Per master: shift FIFO depth 4, entry = {we, sel[3:0], adr[31:0], dat[31:0]} (69b);
   state[m] = IDLE | ATSLAVE (1 outstanding per master => per-master in-order by construction).
 - Grant: m in IDLE, fifo nonempty, slave s=decode(head.adr) not busy (and s5 always ok).
+  Bypass: STB with empty fifo grants the pushed word directly (push@P, pop@P+1).
   Fixed priority m0 > m1 > m2, one grant/cycle. Grant = present (STB[s]=1 with FIFO head data,
   popped), m -> ATSLAVE, busy[s]=1, sl_master[s]=m. (Since IC never presents to a busy slave and
   all slaves accept a presented transfer, grant == accepted; no retry/hold path.)
@@ -224,10 +225,10 @@ F. Perf: Dhrystone (embedded) cycle count -> DMIPS/MHz via TB cycle count;
 
 ## 12. Status tracker
 - [x] scaffold, board/spec recon
-- [ ] 16550 + tb
-- [ ] clint + tb
+- [x] 16550 + tb
+- [x] clint + tb
 - [ ] plic + tb
-- [ ] wb_ic + tb (with WB slave models)
+- [x] wb_ic + tb (with WB slave models)
 - [ ] mmu + tb (walker + TLB, with WB ram)
 - [ ] l1_i/l1_d + tb
 - [ ] core + tb (RV32IM w/o MMU first, then MMU on)
