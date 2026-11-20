@@ -1,5 +1,30 @@
 # progress
 
+## 2026-11-20 (session 5)
+- plic + tb: ALL TESTS PASSED (24 checks P1-P13: reset, prio RW/reserved words,
+  level-latch no-retraction, claim-needs-enable, per-ctx threshold
+  (strict >), per-ctx enable, multicast first-claim-wins (shared IP),
+  prio-desc/tie->low-ID, prio0=never, claim-ignores-threshold, gateway
+  re-arm/complete (bad ID 0/17 ignored; no level = no re-pend), reserved
+  offsets inert, SEL ignored (word only), ACK=1cyc, clean shutdown).
+- rtl/plic.v: WB B4 slave, 16 level gateways, claim = max(prio desc, ID asc)
+  among IP&en[c]&prio>0 (clears IP, returns ID, threshold-independent),
+  complete re-arms gateway (ID not checked vs last claim), EIP[c]=|IP&en[c]
+  &prio>thr[c]. Decode from tools/plic_addr.py (1M-word brute force).
+- LESSONS:
+  - Decode base-page: base 0x0C00_0000 has base[21:12]==0x000, NOT 0x0C0
+    (the 0xC sits in bits 27-24). Off-by-0x0C0 decode made every access fall
+    to reserved. Always take decode constants from the addr tool, never
+    mental math.
+  - iverilog -g2005: out-of-range part-select on a var (`en[16:1]` on
+    `reg [15:0]`) silently X/no-ops, no error. en must be [16:0] (bit16=src16).
+  - iverilog -g2005: Verilog FUNCTION called as a wire, with an `integer`
+    loop index indexing reg arrays, mis-evaluated (claim always 0). Fixed:
+    always @(*) with fixed-width (5-bit) loop index.
+  - Convention: bit N = source N (enable val src1 = 2, srcs 1..5 = 0x3E).
+  - TB: deasserted level does NOT re-pend after complete; TB must re-assert
+    IRQ before expecting re-pend (P5).
+
 ## 2026-11-19 (session 4)
 - wb_ic + tb: ALL TESTS PASSED (25 checks: reset, 1cyc/3cyc slave push->ack latency,
   cross-master order, decode routing, null slave, byte/SEL merge, 8-read burst
@@ -22,7 +47,7 @@
 - notes/design.md sec.12: 16550/clint/wb_ic marked done.
 
 ## next
-- plic + tb, then mmu/tlb (walker + TLB on wb_ram), l1_i/l1_d, core, soc,
+- mmu/tlb (walker + TLB on wb_ram), l1_i/l1_d, core, soc,
   firmware (tests/*.S + clang build), synth (yosys/nextpnr/ecppack + fmax),
   board (lpf/openocd/boot stub), README
 

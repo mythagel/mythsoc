@@ -157,23 +157,45 @@ Interrupts/traps (checked at MA, commit boundary, in-order):
   mret/sret: pc=xepc, xie=1, xpp=cur mode, cur=xpp, sstatus/sie etc per spec.
   wfi = nop.
 
-MMU (Sv32, 4-level):
-  mode: satp.MODE=8 (Sv32) enables translation for all modes (M/S/U).
-  walk: level 3..0, index bits VA[38:30]/[29:21]/[20:12]/[11:3], base = pgd<<12.
-  PTE: [31]D [30]A [22:10]PPN [3]U [2]X [1]W [0]R.
-    leaf types: 4K (R|W set, or R&W&X? R=1,W=1 is PTD -> table; 4K leaf: exactly one of
-    R/W or X with (R|W|X)!=0 and not (R&W)); superpage 4M: X=1,R=0,W=0 at level 1;
-    1G: X=1,R=0,W=0 at level 2; PTD: R=1,W=1 (X don't care -> treated as X=0); invalid: all 0 or W=1,R=0 (with X=0?)
-    -> follow priv spec exactly (Sv32 PTE validity rules).
-  A/D: NO hardware update; PTE with A=0 or (W access & D=0) -> page fault.
-    (Firmware must set A|D bits. Documented.)
-  Privilege checks: M: none; S: PTE.U=0 required; U: PTE.U=1 required.
-  Perms: fetch needs X (and R for M/S/U all), load R, store W.
-  TLB: L1 I: 16-entry 4x4, L1 D: 16-entry 4x4, L2: 256-entry 32x8 (VA[11:8]), LRU.
-    Entry: va[31:0], pa[31:12] (+page size), perms[2:0], u. On walk done: fill L1+L2.
-    Walk: MMU m2 WB master; 4 reads; I-side walk stalls IF, D-side stalls MA;
-    walk result used by both (serialized single walk unit).
-  Page sizes: 4K/4M/1G supported.
+MMU (Sv32; spec 12.3, satp 12.1.11; addresses verified by tools/mmu_addr.py):
+  satp (RV32): MODE[31] ASID[30:22](9b WARL, ASIDLEN=9) PPN[21:0].
+    Table 40 (SXLEN=32): MODE 0=Bare, 1=Sv32. Bare: write satp=0.
+  Translation active ONLY in S/U mode; M-mode: always identity (pa=va), no MMU fault
+    (spec 12.3.2 step 1: "satp must be active, i.e. effective mode S or U").
+    MPRV handled at core (effective mode in = MPRV ? MPP : mode).
+  walk: LEVELS=2 (Fig 65/66). L1 idx = VA[31:22] (10b), L0 idx = VA[21:12] (10b);
+    PAGESIZE=4096 PTESIZE=4.
+    L1 PTE addr = satp.ppn*4096 + VA[31:22]*4; L0 PTE addr = L1.pte.ppn*4096 + VA[21:12]*4.
+    PA = 34b: PPN[1]=PA[33:22] (12b, from PTE[31:20]), PPN[0]=PA[21:12] (10b, from
+    PTE[19:10]); PA[11:0]=VA[11:0]. SoC wires PA[31:0];
+    PPN[21:20]!=0 -> PTE addr escapes 32b SoC -> null read 0 -> v=0 fault (documented).
+    4K leaf: PA[31:12] = {PPN1[9:0], PPN0[9:0]}; 4M leaf: PA[31:0] = PPN1[9:0]<<22 | VA[21:0].
+  PTE bits (Fig 67): V[0] R[1] W[2] X[3] U[4] G[5] A[6] D[7] RSW[9:8] PPN0[19:10] PPN1[31:20].
+    validity: v=0 fault; r=0&w=1 fault; non-leaf (r=x=0): d/a/u must be 0 else fault;
+    RSW ignored; leaf at L0 with r=x=0 fault (i<0).
+    4M mega (leaf at L1): PPN0[9:0]==0 required (virt+phys 4M align) else fault.
+    R/W/X (Table 41): 000 pointer; 001 R; 011 RW; 100 X-only; 101 RX; 111 RWX; R=0,W=1 reserved.
+  Perms (12.3.2 steps 6/8/9): fetch: X (R NOT required); load: R, MXR=1 -> R|X;
+    store/AMO: W (MXR no effect; AMO needs R&W, fault class=store, never load fault).
+    U: fetch S->U=0 (SUM never allows S fetch on U=1); load/store S->U=0|SUM;
+    U-mode -> U=1; M -> no walk.
+  A/D: Svade implemented = FAULT scheme per spec 12.3 (this spec version): A=0 -> page
+    fault; store/AMO with D=0 -> page fault. NO hardware A/D PTE update.
+    Firmware must set A|D bits in PTEs. (Documented.)
+  Faults: cause 12 fetch / 13 load+LR / 15 store+SC+AMO page fault; mtval=VA.
+  TLB (per side I and D):
+    L1: 16e = 4 sets x 4 ways; set VA[5:4]; tag VA[31:6] + sz + asid[8:0]/g.
+    L2: 256e = 32 sets x 8 ways; set VA[12:8]; tag VA[31:13] + sz + asid/g.
+    Entry: v,g,sz,asid[8:0],tagva,pa[31:12] (4M: only upper 10b PA[31:22] used;
+    PA[21:12] taken from VA),r,w,x,u,a,d; LRU 4b stamp (global 4b counter).
+    4K pa[31:0] = {pa12, va[11:0]}; 4M pa[31:0] = {pa12[19:10], va[21:0]}.
+    Walk done -> fill L1+L2 of the REQUESTING side (single serialized walk unit;
+    I-side walk stalls IF, D-side stalls MA).
+    satp write: no auto-flush (SFENCE.VMA does it). sf_all (rs1=rs2=0),
+    sf_asid (rs2!=0; G entries survive asid flush, killed by sf_all).
+  Page sizes: 4K / 4M only (Sv32 LEVELS=2; no 1G in Sv32).
+  Walk latency (1cyc slave): L1 read 2cyc + L0 read 2cyc + 1cyc result = 5cyc miss;
+  hit = 1 cyc. WB B4 read-only master, 1 outstanding.
 
 I-cache: 4 KiB, direct-mapped, 1-word lines (1024 x 32b), tag PA[31:12].
   Miss: stall IF, refill from memory (m0). fence.i & mret/sret: invalidate all.
@@ -227,7 +249,7 @@ F. Perf: Dhrystone (embedded) cycle count -> DMIPS/MHz via TB cycle count;
 - [x] scaffold, board/spec recon
 - [x] 16550 + tb
 - [x] clint + tb
-- [ ] plic + tb
+- [x] plic + tb
 - [x] wb_ic + tb (with WB slave models)
 - [ ] mmu + tb (walker + TLB, with WB ram)
 - [ ] l1_i/l1_d + tb
