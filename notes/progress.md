@@ -1,5 +1,50 @@
 # progress
 
+## 2026-11-21 (session 6)
+- mmu TB status: 53 pass / 6 fail (cyc=292). M1-M4, M6, M8, M9, M11, M12 all green
+  (incl. M12 mid-walk sfence flush-after-fill). Fails: M5 "new set miss",
+  M7 x3, M10 x2.
+- Fixed this session:
+  - TB RAM slave index bug: `ram[a[14:2]]` (13b index) silently wrapped word
+    addresses >= 0x8000 (0xC000->idx 4096 etc.). Max word idx = 0x8008
+    (map C L0 @0x20020) -> index [17:2], array 65536. Repro: /tmp/t_task.v.
+  - TB mmu_req race: requests issued while prior DONE still high consumed the
+    stale response (every later phase desynced). Fix: wait DONE low (negedge)
+    before asserting REQ.
+  - RTL: l1_pa12/l2_pa12/h_pa12 12b->20b (entry stores PA[31:12] per
+    design.md sec.7). 4M hit PA = {pa12[19:10], VA[21:0]}. (M5 "4M hit PA"
+    was failing: PA[31:22] truncated.)
+  - RTL: sfence page flush compared WAY bits of entry idx: L1 i[1:0]->i[3:2],
+    L2 i[4:0]->i[7:3] (set bits). M12 now passes.
+  - tools/mmu_addr.py: +satp C asid=1 word (S_C1=0x8040000C), +B_root_hi PTE
+    @0x87FC = 0x008000CF (VA 0x7FFFFFFF 4M region), +4M 0x7FFFFFFF check.
+- Remaining 6 fails + evidence (per-req DBG + TLB dump live in TB):
+  - M5 "4M new set miss": DUT reads 0x87FC (rlog) -> 0 -> fault 12. TB base
+    map LACKS ram_set(0x87FC, 0x008000CF) (earlier edit: wrong addr 0x807C +
+    failed on 2 matches). Known fix: add the tool's line to the base map.
+  - M7 x3 (U load U=0 / v=0 unmapped / S load U=0): PA=xxxxx004 FAU=x
+    (X-propagation). Suspect: TB init loop zeroes only words 0..32767 of the
+    65536 array (map C L0 idx 9 @0x20024 -> word 0x8009 = X). Fix: init all
+    65536.
+  - M10 x2 (C asid1 NG fill / NG flushed asid): same X-PA pattern; likely same
+    root cause. Re-verify after the two fixes.
+- OPEN RTL suspicion (unverified): reset zeroes only l1_v/l2_v; l1_st/l2_st/
+  l1_pa12/... left X. fw1/fw2 min-stamp scan over X l1_st -> X way -> fill
+  index X (l1_v[fe1] with fe1=X). Next probe: dump lru/l1_st[0..3]/fe1/fw1
+  at fill (hierarchical or RTL DBG) — do NOT hand-reason iverilog X-index NBA
+  write semantics.
+- On green: remove TB instrumentation (tlb_dump task, per-req DBG, dn,
+  DBG lines), keep rlog; mark mmu done in design.md sec.12.
+- LESSONS:
+  - iverilog -g2005: part-select index width silently wraps (13b index on a
+    32768-word array for addrs needing 16b) — NO warning, silent corruption.
+    Derive index width from the tool's max address, never eyeball.
+  - iverilog -g2005: no `break` (elab error "unknown task") — use while.
+  - TB protocol: never issue a request while prior DONE is high; gate on
+    negedge for both edges.
+  - sfence page flush must compare SET bits of {set,way}: L1 i[3:2],
+    L2 i[7:3] (ways are not part of the page index).
+
 ## 2026-11-20 (session 5)
 - plic + tb: ALL TESTS PASSED (24 checks P1-P13: reset, prio RW/reserved words,
   level-latch no-retraction, claim-needs-enable, per-ctx threshold
@@ -47,9 +92,12 @@
 - notes/design.md sec.12: 16550/clint/wb_ic marked done.
 
 ## next
-- mmu/tlb (walker + TLB on wb_ram), l1_i/l1_d, core, soc,
-  firmware (tests/*.S + clang build), synth (yosys/nextpnr/ecppack + fmax),
-  board (lpf/openocd/boot stub), README
+- mmu (finish): 1) add ram_set(32'h000087FC, 32'h008000CF) to TB base map;
+  2) TB init loop -> all 65536 words; 3) rerun; 4) if M10 still X: probe
+  lru/l1_st/fe1/fw1 at fill; 5) green -> strip instrumentation, mark done
+  in design.md sec.12
+- then l1_i/l1_d, core, soc, firmware (tests/*.S + clang build), full suite,
+  synth (yosys/nextpnr/ecppack + fmax), board (lpf/openocd/boot stub), README
 
 ## 2026-11-18 (session 3)
 - tools/addr.py (region/regmap modes). Caught: mtime regs at word 0x2FFE/0x2FFF (not 0x2FFF/0x3000).
