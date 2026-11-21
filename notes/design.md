@@ -258,7 +258,15 @@ F. Perf: Dhrystone (embedded) cycle count -> DMIPS/MHz via TB cycle count;
 - [x] wb_ic + tb (with WB slave models)
 - [x] mmu + tb (walker + TLB, with WB ram): 59 checks M1-M12 all pass
 - [x] l1_i + tb (23 checks I1-I10) and l1_d + tb (20 checks D1-D10)
-- [ ] core + tb (RV32IM w/o MMU first, then MMU on)
+- [ ] core + tb (plan: notes/core.md)
+  - [ ] C1 fetch+decode+R/I ALU (+LUI/AUIPC), straight-line, Bare
+  - [ ] C2 M ext (MUL/DIV/REM x4 + H/HSU/HU)
+  - [ ] C3 branches+jumps+younger flush
+  - [ ] C4 loads/stores via l1_d (+l1_i in IF), misaligned trap
+  - [ ] C5 CSRs + sync exceptions (ecall/ebreak/illegal, mret, deleg)
+  - [ ] C6 interrupts (mip/mie, M>S, timer/sw/external, nested M->S)
+  - [ ] C7 MMU on (Sv32 I+D, perm faults, A/D, sfence, 4K/4M)
+  - [ ] C8 hazards + full RV32IM regression (Bare + Sv32)
 - [ ] soc + tb (hex firmware)
 - [ ] firmware: tests/*.S + build (clang)
 - [ ] full suite green

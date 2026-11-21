@@ -1,5 +1,24 @@
 # progress
 
+## 2026-11-21 (session 8)
+- core task decomposed -> notes/core.md (8 ordered pieces C1-C8, each RTL
+  increment + TB group, green-before-next). Strategy: full datapath built
+  once (mmu x2 + l1_i + l1_d + regfile + 5-stage pipe + csr/trap/int state),
+  C1-C6 tested M-mode Bare (MMU identity), C7 Sv32, C8 regression.
+- Grounded in spec via new tools:
+  - tools/extract_tables.py (pdfplumber): clean RV32I Table 13 (40 instr),
+    RV32M Table 15 (8 ops), mcause Table 16 / scause Table 37 cause codes.
+  - tools/csr_list.py: parses priv Ch.19 CSR listing -> addr/access/name.
+    Captured machine+supervisor CSR set for C5.
+  - tools/misa.py: misa reset for RV32IM = 0x40001100 (MXL=1 bits[31:30],
+    M=bit12, I=bit8; spec 3.1.1 alpha-index A=0..Z=25).
+- Resolved spec questions for C5: mtval (priv 3.1.16): pf/misaligned/
+  access-fault on fetch/load/store -> VA; ebreak -> VA; illegal -> 0 (instr
+  bits optional, skip v1); ecall/other -> 0. Reset (3.4): mode=M,
+  MIE=MPRV=MBE=0, PC=0, mcause=0, rest 0.
+- design.md sec.12: core line expanded to C1-C8 sub-checklist (notes/core.md).
+- next: C1 (if/decode/ALU straight-line) + tb group.
+
 ## 2026-11-21 (session 7)
 - mmu + tb: ALL TESTS PASSED (59 checks M1-M12). Fixes this session:
   - TB base map was missing 2 PTEs vs tools/mmu_addr.py output:
