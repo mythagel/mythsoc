@@ -1,5 +1,29 @@
 # progress
 
+## 2026-11-21 (session 7)
+- mmu + tb: ALL TESTS PASSED (59 checks M1-M12). Fixes this session:
+  - TB base map was missing 2 PTEs vs tools/mmu_addr.py output:
+    0x000087FC (B_root_hi, M5 4M new-set) and 0x00020020 (C_l0[8], M7/M10
+    VA 0x8004). Verified by set-diff of tool output vs TB ram_set lines
+    (python).
+  - TB init loop: 32768 -> 65536 words (word 0x8008 = 0x20020 was X ->
+    PA=xxxxx004 FAU=x on M7/M10).
+  - Test-expectation fix: M7 "S load U=0 OK" expected lat7 but the L2 entry
+    (set8, tag VA[31:17]=0, asid0) filled by the earlier "U load U=0 13"
+    request survives (L1 was evicted by the G-page fill, L2 set8 untouched)
+    -> correct behavior is an L2 hit, lat2. RTL verified correct via S_R
+    fill probes (fe1/fe2/fl_ok) + REQ match-wire probes; probes stripped
+    after green (kept rlog).
+- LESSONS:
+  - Always set-diff the tool-generated constant map vs the TB's copy; both
+    0x87FC and 0x20020 were dropped when the map was first written by hand.
+  - Hex literal width: 0x2001C is 32'h0002001C (8 digits), not 32'h00002001C.
+  - When a "hit" is observed where none should exist, first check the second
+    TLB level: L1 eviction does NOT evict L2 (separate sets).
+- next: l1_i/l1_d + tb, then core, soc, firmware (tests/*.S + clang build),
+  full suite, synth (yosys/nextpnr/ecppack + fmax), board (lpf/openocd/boot
+  stub), README
+
 ## 2026-11-21 (session 6)
 - mmu TB status: 53 pass / 6 fail (cyc=292). M1-M4, M6, M8, M9, M11, M12 all green
   (incl. M12 mid-walk sfence flush-after-fill). Fails: M5 "new set miss",
@@ -91,13 +115,8 @@
   guard comment at ok/err in all TBs. (Found: 4 PASS lines printed truncated.)
 - notes/design.md sec.12: 16550/clint/wb_ic marked done.
 
-## next
-- mmu (finish): 1) add ram_set(32'h000087FC, 32'h008000CF) to TB base map;
-  2) TB init loop -> all 65536 words; 3) rerun; 4) if M10 still X: probe
-  lru/l1_st/fe1/fw1 at fill; 5) green -> strip instrumentation, mark done
-  in design.md sec.12
-- then l1_i/l1_d, core, soc, firmware (tests/*.S + clang build), full suite,
-  synth (yosys/nextpnr/ecppack + fmax), board (lpf/openocd/boot stub), README
+## next (done in session 7)
+- mmu finished: ALL TESTS PASSED (59). See session 7 entry above.
 
 ## 2026-11-18 (session 3)
 - tools/addr.py (region/regmap modes). Caught: mtime regs at word 0x2FFE/0x2FFF (not 0x2FFF/0x3000).

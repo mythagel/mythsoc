@@ -59,6 +59,7 @@ module tb_mmu;
     // index = A[17:2]: max addr used 0x20020 (map C L0) -> word 0x8008
     reg [31:0] ram [0:65535];
     integer ri;
+
     always @(posedge clk) begin
         if (STB) begin
             DATO <= ram[ADRW[17:2]];
@@ -84,27 +85,7 @@ module tb_mmu;
         end
     endtask
 
-    // temp: dump TLB entries for current VA_I (hierarchical)
-    task tlb_dump;
-        integer s1, s2, k;
-        begin
-            s1 = VA_I[13:12];
-            s2 = VA_I[16:12];
-            for (k = 0; k < 4; k = k + 1)
-                $display("  TLB1 s%0d w%0d v=%b tag=%05x sz=%b g=%b as=%0d",
-                         s1, k, dut.l1_v[s1 * 4 + k], dut.l1_tag[s1 * 4 + k],
-                         dut.l1_sz[s1 * 4 + k], dut.l1_g[s1 * 4 + k],
-                         dut.l1_asid[s1 * 4 + k]);
-            for (k = 0; k < 8; k = k + 1)
-                $display("  TLB2 s%0d w%0d v=%b tag=%05x sz=%b g=%b as=%0d",
-                         s2, k, dut.l2_v[s2 * 8 + k], dut.l2_tag[s2 * 8 + k],
-                         dut.l2_sz[s2 * 8 + k], dut.l2_g[s2 * 8 + k],
-                         dut.l2_asid[s2 * 8 + k]);
-        end
-    endtask
-
     // ---- request: pulse REQ, wait DONE; record result
-    integer dn;
     reg        q_ok, q_fau;
     reg [31:0] q_pa;
     reg [3:0]  q_cause;
@@ -133,10 +114,6 @@ module tb_mmu;
             q_lat = cyc - lat0;
             q_stb = stb_cnt;
             stb_cnt = 0;
-            dn = dn + 1;
-            $display("DBG %0d lat=%0d stb=%0d rc=%0d r0=%h r1=%h PA=%h FAU=%b CAU=%0d",
-                     dn, q_lat, q_stb, rc, rlog[0], rlog[1], q_pa, q_fau, q_cause);
-            tlb_dump;
         end
     endtask
 
@@ -159,7 +136,7 @@ module tb_mmu;
                      S_C1 = 32'h8040000C;
 
     initial begin
-        for (ri = 0; ri < 32768; ri = ri + 1) ram[ri] = 32'h0;
+        for (ri = 0; ri < 65536; ri = ri + 1) ram[ri] = 32'h0;
         rst = 1;
         repeat (3) @(negedge clk);
         rst = 0;
@@ -168,6 +145,7 @@ module tb_mmu;
         // base RAM map (tools/mmu_addr.py)
         ram_set(32'h00004000, 32'h00004001);
         ram_set(32'h00008004, 32'h008000CF);
+        ram_set(32'h000087FC, 32'h008000CF);
         ram_set(32'h0000C000, 32'h00008001);
         ram_set(32'h00010004, 32'h000004CF);
         ram_set(32'h00010008, 32'h000008CF);
@@ -178,6 +156,7 @@ module tb_mmu;
         ram_set(32'h00020014, 32'h000004DF);
         ram_set(32'h00020018, 32'h0000040B);
         ram_set(32'h0002001C, 32'h000004EF);
+        ram_set(32'h00020020, 32'h000004CF);
 
         // ---- M1 reset: M-mode / Bare identity (no walk, TLB untouched)
         ram_clear();
@@ -399,8 +378,10 @@ module tb_mmu;
             ok("M7: G page load OK");
         else
             err("M7: G page load OK");
+        // L2 entry from "U load U=0 13" (same VA/asid, set8 tag VA[31:17])
+        // survives the L1 eviction by the G-page fill -> L2 hit, lat2.
         mmu_req(32'h00008004, 2'd1, 2'd1, S_C0, 1'b0, 1'b0);
-        if (!q_fau && q_pa === 32'h00001004 && q_lat === 9'd7)
+        if (!q_fau && q_pa === 32'h00001004 && q_lat === 9'd2)
             ok("M7: S load U=0 OK");
         else
             err("M7: S load U=0 OK");

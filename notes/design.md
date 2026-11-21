@@ -251,9 +251,7 @@ F. Perf: Dhrystone (embedded) cycle count -> DMIPS/MHz via TB cycle count;
 - [x] clint + tb
 - [x] plic + tb
 - [x] wb_ic + tb (with WB slave models)
-- [ ] mmu + tb (walker + TLB, with WB ram) — IN PROGRESS: tb written, 53 pass
-  / 6 fail (M5 x1, M7 x3, M10 x2); known fixes pending (see progress.md
-  session 6)
+- [x] mmu + tb (walker + TLB, with WB ram): 59 checks M1-M12 all pass
 - [ ] l1_i/l1_d + tb
 - [ ] core + tb (RV32IM w/o MMU first, then MMU on)
 - [ ] soc + tb (hex firmware)
