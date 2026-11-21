@@ -257,7 +257,7 @@ F. Perf: Dhrystone (embedded) cycle count -> DMIPS/MHz via TB cycle count;
 - [x] plic + tb
 - [x] wb_ic + tb (with WB slave models)
 - [x] mmu + tb (walker + TLB, with WB ram): 59 checks M1-M12 all pass
-- [ ] l1_i/l1_d + tb
+- [x] l1_i + tb (23 checks I1-I10) and l1_d + tb (20 checks D1-D10)
 - [ ] core + tb (RV32IM w/o MMU first, then MMU on)
 - [ ] soc + tb (hex firmware)
 - [ ] firmware: tests/*.S + build (clang)
