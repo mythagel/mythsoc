@@ -4,6 +4,11 @@ Specs in `specs/` (extracted text under /tmp/specs_txt) are authoritative:
 unpriv = RV32I/M unprivileged, priv = privileged (CSR/trap/MMU/Sv32),
 plic = RISC-V PLIC v1.0.0, wb = Wishbone B4.
 
+Load bitstream: "openFPGALoader --cable dirtyJtag --freq 1000000"
+Reset fpga: "openFPGALoader --cable dirtyJtag --reset"
+UART FPGA pin C4 connected to USB-Serial adapter /dev/ttyUSB0
+5a-75b (V8.2) board specs in ~/dev/project/chubby75/5a-75b/
+
 ## 1. System overview
 
 mythrv32: RV32IM, M+S+U, 5-stage in-order, Sv32 MMU (L1/L2 TLB + page walk),
