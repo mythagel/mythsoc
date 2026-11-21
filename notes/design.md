@@ -259,4 +259,4 @@ F. Perf: Dhrystone (embedded) cycle count -> DMIPS/MHz via TB cycle count;
 - [ ] full suite green
 - [ ] yosys synth + nextpnr + ecppack (bitstream) + fmax report
 - [ ] board lpf + openocd + boot stub (BRAM)
-- [ ] docs (README)
+- [ ] docs (README + every wishbone peripheral)
