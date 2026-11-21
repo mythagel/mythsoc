@@ -258,6 +258,8 @@ F. Perf: Dhrystone (embedded) cycle count -> DMIPS/MHz via TB cycle count;
 - [x] wb_ic + tb (with WB slave models)
 - [x] mmu + tb (walker + TLB, with WB ram): 59 checks M1-M12 all pass
 - [x] l1_i + tb (23 checks I1-I10) and l1_d + tb (20 checks D1-D10)
+- [ ] update mmu.v to be fully pipelined (high performance)
+- [ ] update l1_i & l1_d to be fully pipelined (high performance)
 - [ ] core + tb (plan: notes/core.md)
   - [ ] C1 fetch+decode+R/I ALU (+LUI/AUIPC), straight-line, Bare
   - [ ] C2 M ext (MUL/DIV/REM x4 + H/HSU/HU)
