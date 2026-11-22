@@ -99,12 +99,17 @@ module core (
     wire        exma_jbr, exma_taken, exma_v2;
     wire [31:0] exma_target;
     // C5: MA trap / xret also redirect (and flush younger + fetch residue)
-    wire        ma_trap, ma_xret, ma_mret;
+    wire        ma_trap, ma_xret, ma_mret, int_fire, int_to_s;
     wire [31:0] trap_pc, xret_pc, trap_cause, trap_tval;
     wire        trap_to_s;
-    wire        redirect = (exma_v && exma_jbr && exma_taken) || ma_trap || ma_xret;
+    wire        branch_committed = exma_v && exma_jbr && exma_taken;
+    wire        redirect = branch_committed || ma_trap || ma_xret || int_fire;
     wire        flush = redirect;
-    wire [31:0] redirect_pc = ma_trap ? trap_pc : ma_xret ? xret_pc : exma_target;
+    wire [31:0] trap_pc_i = int_to_s ? {stvec[31:2], 2'b00} : {mtvec[31:2], 2'b00};
+    wire [31:0] redirect_pc = ma_trap ? trap_pc
+                              : ma_xret ? xret_pc
+                              : branch_committed ? exma_target
+                              : trap_pc_i;
 
     // ------------------------------------------------------------ fetch (IF)
     reg  [31:0] fpc;          // next VA to fetch
@@ -740,7 +745,7 @@ module core (
             mawb_v <= 1'b0; mawb_wr <= 1'b0; mawb_rd <= 5'h0; mawb_res <= 32'h0; mawb_pc <= 32'h0;
         end else if (!stall) begin
             mawb_v    <= exma_v;
-            mawb_wr   <= exma_wr && !ma_trap_w;   // trap kills own writeback
+            mawb_wr   <= exma_wr && !ma_trap_w;   // sync trap kills writeback
             mawb_rd   <= exma_rd;
             mawb_res  <= exma_csr ? csr_rdata
                        : (exma_mem && !exma_st) ? load_rdata : exma_res;
@@ -845,8 +850,29 @@ module core (
     assign trap_pc    = trap_to_s ? {stvec[31:2], 2'b00} : {mtvec[31:2], 2'b00};
     assign xret_pc    = ma_mret ? {mepc[31:1], 1'b0} : {sepc[31:1], 1'b0};
 
+    // ---------------------------------------- C6: interrupt evaluation
+    // Sources wired: MEIP(11)/SEIP(9) pins (PLIC), SSIP(1) CSR bit.
+    // Taken at MA commit boundary after a clean sequential retire; the
+    // interrupted-stream instruction retires normally, epc = pc+4.
+    wire [31:0] mip_p = mip_r;
+    wire        m_gate = (priv != PM) || mstatus[3];     // MIE
+    wire        s_gate = (priv == PU) ||
+                         ((priv == PS) && mstatus[1]);   // SIE (S-mode only)
+    wire [31:0] m_pend = mie & mip_p & ~mideleg;
+    wire [31:0] s_pend = mie & mip_p &  mideleg;
+    wire int_m = (m_pend != 32'h0) && m_gate && (priv != PM || mstatus[3]);
+    wire int_s = (s_pend != 32'h0) && s_gate;
+    // fire only on a clean sequential retire (no trap/xret/branch that cycle)
+    assign int_fire  = exma_v && !stall && !ma_trap && !ma_xret &&
+                       !branch_committed && (int_m || int_s);
+    assign int_to_s  = !int_m && int_s;
+
     // ---------------------------------------------- C5: architectural state
-    wire [31:0] mstatus_new = x_src & MSTATUS_WMASK;
+    // RS/RC merge: write value = src | old (RS), old & ~src (RC), src (RW)
+    wire [31:0] csr_wv = (x_f3[1:0] == 2'b01) ? x_src :
+                         (x_f3[1:0] == 2'b10) ? (csr_rdata | x_src)
+                                              : (csr_rdata & ~x_src);
+    wire [31:0] mstatus_new = csr_wv & MSTATUS_WMASK;
     wire [31:0] mstatus_wv  = (mstatus_new[12:11] == 2'b10)
                             ? ((mstatus_new & ~32'h1800) | 32'h0000)  // 10 -> U
                             : mstatus_new;
@@ -862,43 +888,44 @@ module core (
             if (csr_wr_attempt && !csr_illegal) begin
                 case (x_csr)
                     12'h300: mstatus <= (mstatus & ~MSTATUS_WMASK) | mstatus_wv;
-                    12'h302: medeleg <= x_src & MEDELEG_MASK;
-                    12'h303: mideleg <= x_src & MIDELEG_MASK;
-                    12'h304: mie     <= x_src & MIE_MASK;
-                    12'h305: mtvec   <= {x_src[31:1], 1'b0};   // MODE=0 direct only
-                    12'h340: mscratch_r <= x_src;
-                    12'h341: mepc    <= {x_src[31:1], 1'b0};
-                    12'h342: mcause  <= x_src;
-                    12'h343: mtval   <= x_src;
-                    12'h344: ssip_r  <= x_src[1];              // mip: SSIP writable
+                    12'h302: medeleg <= csr_wv & MEDELEG_MASK;
+                    12'h303: mideleg <= csr_wv & MIDELEG_MASK;
+                    12'h304: mie     <= csr_wv & MIE_MASK;
+                    12'h305: mtvec   <= {csr_wv[31:1], 1'b0};   // MODE=0 direct only
+                    12'h340: mscratch_r <= csr_wv;
+                    12'h341: mepc    <= {csr_wv[31:1], 1'b0};
+                    12'h342: mcause  <= csr_wv;
+                    12'h343: mtval   <= csr_wv;
+                    12'h344: ssip_r  <= csr_wv[1];              // mip: SSIP writable
                     12'h100: mstatus <= (mstatus & ~SSTATUS_MASK)
-                                     | (x_src & SSTATUS_MASK);
-                    12'h104: mie     <= (mie & ~mideleg) | (x_src & mideleg);
-                    12'h105: stvec   <= {x_src[31:1], 1'b0};
-                    12'h140: sscratch <= x_src;
-                    12'h141: sepc    <= {x_src[31:1], 1'b0};
-                    12'h142: scause  <= x_src;
-                    12'h143: stval   <= x_src;
-                    12'h14D: stimecmp_r <= x_src;
-                    12'h180: satp_r  <= {x_src[31], x_src[30:22], x_src[21:0]};
+                                     | (csr_wv & SSTATUS_MASK);
+                    12'h104: mie     <= (mie & ~mideleg) | (csr_wv & mideleg);
+                    12'h105: stvec   <= {csr_wv[31:1], 1'b0};
+                    12'h140: sscratch <= csr_wv;
+                    12'h141: sepc    <= {csr_wv[31:1], 1'b0};
+                    12'h142: scause  <= csr_wv;
+                    12'h143: stval   <= csr_wv;
+                    12'h14D: stimecmp_r <= csr_wv;
+                    12'h180: satp_r  <= csr_wv;
                     default: ;
                 endcase
             end
-            // --- trap entry (overwrites any same-instr CSR effect: trap
-            //     instrs have no CSR writes here) ---
-            if (ma_trap) begin
-                if (trap_to_s) begin
-                    sepc   <= {exma_pc[31:1], 1'b0};
-                    scause <= trap_cause;
-                    stval  <= trap_tval;
+            // --- trap entry (synchronous) or interrupt delivery (C6) ---
+            if (ma_trap || int_fire) begin
+                if (trap_to_s || int_to_s) begin
+                    sepc   <= int_fire ? (exma_pc + 32'h4)
+                                       : {exma_pc[31:1], 1'b0};
+                    scause <= int_fire ? 32'h8000_0009 : trap_cause;
+                    stval  <= int_fire ? 32'h0 : trap_tval;
                     mstatus[8] <= priv[0];            // SPP
                     mstatus[5] <= mstatus[1];         // SPIE <- SIE
                     mstatus[1] <= 1'b0;               // SIE  <- 0
                     priv     <= PS;
                 end else begin
-                    mepc   <= {exma_pc[31:1], 1'b0};
-                    mcause <= trap_cause;
-                    mtval  <= trap_tval;
+                    mepc   <= int_fire ? (exma_pc + 32'h4)
+                                       : {exma_pc[31:1], 1'b0};
+                    mcause <= int_fire ? 32'h8000_000B : trap_cause;
+                    mtval  <= int_fire ? 32'h0 : trap_tval;
                     mstatus[12:11] <= priv;           // MPP (arch encoding)
                     mstatus[7] <= mstatus[3];         // MPIE <- MIE
                     mstatus[3] <= 1'b0;               // MIE  <- 0

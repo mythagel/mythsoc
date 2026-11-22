@@ -42,7 +42,7 @@ def imm_j(insn):
     return v - (1 << 21) if v & 0x100000 else v
 
 
-def run(words, start_pc, verbose=False):
+def run(words, start_pc, verbose=False, arm_m=-1, arm_s=-1):
     rf = [0] * 32
     memw = {}                      # word index -> word (DRAM model, C4)
     P = {'priv': 3, 'mstatus': 0, 'medeleg': 0, 'mideleg': 0, 'mie': 0,
@@ -117,13 +117,54 @@ def run(words, start_pc, verbose=False):
     def illegal():
         return trap(2, 0)
 
+    pins = {'m': 0, 's': 0, 'm_to': 0, 's_to': 0}
+    arm = {'m': arm_m, 's': arm_s}
+    LENT = 60
+
+    def mip_now():
+        return 0x800 * pins['m'] | 0x200 * pins['s'] | 2 * P['ssip']
+
+    def int_deliver(which, epc):
+        if which == 'm':
+            P['mepc'] = epc & ~1; P['mcause'] = 0x8000000B; P['mtval'] = 0
+            m = P['mstatus']
+            P['mstatus'] = (m & ~0x1800) | (P['priv'] << 11)
+            P['mstatus'] = (P['mstatus'] | (1 << 7)) if ((m >> 3) & 1) \
+                else (P['mstatus'] & ~(1 << 7))
+            P['mstatus'] &= ~(1 << 3)
+            P['priv'] = 3
+            return P['mtvec'] & ~3
+        else:
+            P['sepc'] = epc & ~1; P['scause'] = 0x80000009; P['stval'] = 0
+            m = P['mstatus']
+            P['mstatus'] = (m & ~(1 << 8)) | ((P['priv'] & 1) << 8)
+            P['mstatus'] = (P['mstatus'] & ~((1 << 5) | (1 << 1))) | (((m >> 1) & 1) << 5)
+            P['priv'] = 1
+            return P['stvec'] & ~3
+
     guard = 0
     while 0 <= pc < 4 * len(words):
         guard += 1
         if guard > 10000:
             print('emu32: RUNAWAY pc=%#x priv=%d mstatus=%#x' % (pc, P['priv'], P['mstatus']), file=sys.stderr)
             break
+        # boundary before retiring this pc: consume pin timers, snapshot
+        # interrupt candidacy (pins+enables as of NOW = RTL retire cycle start)
+        for k in ('m', 's'):
+            if pins[k]:
+                pins[k + '_to'] -= 1
+                if pins[k + '_to'] <= 0:
+                    pins[k] = 0
+        mp = P['mie'] & mip_now() & ~P['mideleg']
+        sp = P['mie'] & mip_now() & P['mideleg']
+        g_m = P['priv'] != 3 or ((P['mstatus'] >> 3) & 1)
+        g_s = P['priv'] == 0 or (P['priv'] == 1 and ((P['mstatus'] >> 1) & 1))
+        icand = 'm' if (mp and g_m) else ('s' if (sp and g_s) else None)
         insn = words[pc // 4]
+        if pc == arm['m'] and not pins['m']:
+            pins['m'] = 1; pins['m_to'] = LENT
+        if pc == arm['s'] and not pins['s']:
+            pins['s'] = 1; pins['s_to'] = LENT
         op = insn & 0x7F
         rd = (insn >> 7) & 31
         f3 = (insn >> 12) & 7
@@ -159,8 +200,10 @@ def run(words, start_pc, verbose=False):
                 pc = trap({3: 11, 1: 9, 0: 8}[P['priv']], 0); n += 1; continue
             if f7 == 0 and rs2 == 1:                  # EBREAK
                 pc = trap(3, pc); n += 1; continue
-            if f7 == 2 and rs2 == 5: pass             # WFI = nop
-            elif f7 == 9: pass                        # SFENCE.VMA = nop (C5)
+            if f7 == 2 and rs2 == 5:                  # WFI = nop
+                n += 1; pc = (pc + 4) & MASK; continue
+            elif f7 == 9:                             # SFENCE.VMA = nop (C5)
+                n += 1; pc = (pc + 4) & MASK; continue
             elif f7 == 0x18 and rs2 == 2:             # MRET
                 if P['priv'] != 3: pc = illegal(); n += 1; continue
                 m = P['mstatus']
@@ -199,7 +242,10 @@ def run(words, start_pc, verbose=False):
                 nv = src if f3 in (1, 5) else (old | src) if f3 in (2, 6) else (old & ~src)
                 csr_write(addr, nv & MASK)
             rf[rd] = 0 if rd == 0 else (w & MASK)
-            n += 1; pc = (pc + 4) & MASK; continue
+            n += 1
+            if icand:
+                pc = int_deliver(icand, pc + 4); continue
+            pc = (pc + 4) & MASK; continue
 
         w = None
         if op == 0x37: w = imm_u
@@ -280,6 +326,9 @@ def run(words, start_pc, verbose=False):
         if op not in (0x63, 0x67, 0x6F, 0x23):
             rf[rd] = 0 if rd == 0 else (w & MASK)
         n += 1
+        if icand and (nxt & MASK) == ((pc + 4) & MASK):
+            pc = int_deliver(icand, pc + 4)
+            continue
         if verbose:
             print("%#010x: %#010x  x%d=%#010x prv=%d" % (pc, insn, rd, rf[rd], P['priv']),
                   file=sys.stderr)
@@ -296,14 +345,17 @@ def main():
     hex_f = exp_f = None
     start = 0
     trace = "--trace" in args
+    arm_m = arm_s = -1
     for i, a in enumerate(args):
+        if a == "--arm-m": arm_m = int(args[i + 1], 0)
+        if a == "--arm-s": arm_s = int(args[i + 1], 0)
         if a == "--hex":  hex_f = args[i + 1]
         if a == "--exp":  exp_f = args[i + 1]
         if a == "--start": start = int(args[i + 1], 0)
     data = open(bin_f, "rb").read()
     data += b"\0" * ((4 - len(data) % 4) % 4)
     words = list(struct.unpack("<%dI" % (len(data) // 4), data))
-    rf, n, endpc, memw = run(words, start, verbose=trace)
+    rf, n, endpc, memw = run(words, start, verbose=trace, arm_m=arm_m, arm_s=arm_s)
     print("emu32: %d instrs, end pc=%#x" % (n, endpc))
     nz = [(i, v) for i, v in enumerate(rf) if i and v]
     print("emu32: rf non-zero: " + " ".join("x%d=%#010x" % t for t in nz))
@@ -318,7 +370,7 @@ def main():
             for i in range(32):
                 f.write("exp[%d] = 32'h%08x;\n" % (i, rf[i]))
             for k in sorted(memw):
-                if 0 <= k - 0x20000000 < 96:      # TB m1 RAM page window
+                if 0 <= k - 0x20000000 < 128:      # TB m1 RAM page window
                     f.write("mexp[%d] = 32'h%08x;\n" % (k - 0x20000000, memw[k]))
 
 if __name__ == "__main__":

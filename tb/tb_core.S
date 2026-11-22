@@ -137,10 +137,10 @@ _start:
     lw    x0, 2(x22)            # misaligned load:  rec3 cause4 tval=+2
     sw    x0, 1(x22)            # misaligned store:  rec4 cause6 tval=+1
     ecall                       # rec5: cause11 (M ecall)
-    # --- S-mode phase: delegate ebreak(3)+ecallS(9), drop to S ---
+    # --- S-mode phase: delegate ebreak(3) only, drop to S ---
     la    x24, s_hnd
     csrw  stvec, x24
-    li    x25, 0x208
+    li    x25, 0x8
     csrw  medeleg, x25
     li    x25, 0x800
     csrs  mstatus, x25          # MPP <- S
@@ -148,12 +148,52 @@ _start:
     csrw  mepc, x25
     mret                        # -> S at scode, priv=S
 scode:
-    ecall                       # delegated -> S handler (rec6 cause9|0x20)
-    ebreak                      # delegated -> S handler (rec7 cause3|0x20)
-    csrw  medeleg, x0
-    ecall                       # not delegated -> M handler: cause9,
-                                # M handler sets MPP=M then mret -> M here
-    csrr  x26, sstatus          # M-mode view of sstatus (masked) - no trap
+    ebreak                      # delegated -> S handler (rec 0x23), sret->S
+    ecall                       # not delegated -> M handler (cause 9):
+                                # m_hnd sets MPP=M, mret resumes here in M
+    csrr  x26, sstatus          # back in M: view of sstatus - no trap
+    # ---- C6: M external interrupt (meip pin armed at irq_arm_m, by TB) ----
+irq_arm_m:
+    li    x25, 0x800
+    csrw  mie, x25              # MEIE
+    li    x25, 0x8
+    csrs  mstatus, x25          # MIE -> pending meip taken at a clean retire
+    addi  x30, x30, 1           # busy retires while pin held
+    addi  x30, x30, 1
+    addi  x30, x30, 1
+    addi  x30, x30, 1
+    addi  x30, x30, 1
+    addi  x30, x30, 1
+    addi  x30, x30, 1
+    addi  x30, x30, 1
+    addi  x30, x30, 1
+    addi  x30, x30, 1
+    csrw  mie, x0               # belt: no refire after handler consumed
+    li    x25, 0x8
+    csrc  mstatus, x25          # MIE off
+    # ---- C6b: S-delegated external interrupt (seip armed at irq_arm_s) ----
+    li    x25, 0x200
+    csrw  mideleg, x25          # SEIP delegated to S
+    li    x25, 0x200
+    csrs  mie, x25              # SEIE
+    li    x25, 0x800
+    csrs  mstatus, x25          # MPP <- S
+    la    x25, irq_arm_s
+    csrw  mepc, x25
+    mret                        # -> S
+irq_arm_s:
+    li    x25, 0x2
+    csrs  sstatus, x25          # SIE on (S-mode) -> seip fires
+    addi  x31, x0, 1            # S busy retires
+    addi  x31, x31, 1
+    addi  x31, x31, 1
+    addi  x31, x31, 1
+    addi  x31, x31, 1
+    addi  x31, x31, 1
+    addi  x31, x31, 1
+    addi  x31, x31, 1
+    ecall                       # SEIE/SIE cleared in s_hnd; exit to M:
+                                # medeleg[9]=0 now -> m_hnd cause9 -> M
     j     12f
     .align 4
 m_hnd:                          # M handler: rec=[cause,epc,tval]; skip; mret
@@ -169,7 +209,10 @@ m_hnd:                          # M handler: rec=[cause,epc,tval]; skip; mret
     addi  x23, x23, 1
     addi  x20, x20, 4
     csrw  mepc, x20
-    li    x26, 9
+    srli  x26, x19, 31
+    beq   x26, x0, 22f          # interrupt: consume (mie=0)
+    csrw  mie, x0
+22: li    x26, 9
     bne   x19, x26, 20f
     li    x26, 0x1800           # ecall-from-S: return to M (MPP=M)
     csrs  mstatus, x26
@@ -189,5 +232,9 @@ s_hnd:                          # S handler: same slot chain, cause|0x20, sret
     addi  x23, x23, 1
     addi  x20, x20, 4
     csrw  sepc, x20
+    li    x26, 0x200
+    csrc  sie, x26              # consume: clear SEIE (mie&mideleg view)
+    li    x26, 0x2
+    csrc  sstatus, x26          # SIE off (refire guard)
     sret
 12: j     12b                   # halt (self-loop)

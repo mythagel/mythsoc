@@ -31,6 +31,22 @@
   objcopy -O binary without linking => every branch offset 0 (self-loop!).
   scripts/core_asm.sh now links with ld.lld (-nostdlib -Ttext=0 -e _start).
 - emu32: BRANCH/JAL/JALR + halt-on-self-loop exit.
+## 2026-11-22 (session 12)
+- C5 GREEN (49): CSR+trap+delegation+S-mode. Bugs: mscratch/mepc reg collision
+  (0x340 wrote the mepc reg - split regs); fetch FIFO fq_w/fq_r NOT reset on
+  flush (only fq_c) -> post-trap stream corruption; CSRRS/RC merge missing in
+  RTL MA write path (wrote raw src) - masked earlier by zero-old bits.
+- C6 GREEN (54): interrupts: meip/seip pins armed by TB on retire-PC match
+  (PC_ARM_M/S from llvm-nm -> tb_core_irq.vh), mirrored by emu --arm-m/-s;
+  take at MA on clean sequential retire (epc=pc+4); M>S priority; mideleg
+  routing; MIE/SIE gates; handler consume=csrw mie,0 (polarity bug found via
+  trace); s_hnd csrc sie/sstatus. emu bug: int_deliver SPP write clobbered by
+  base-m reuse.
+- Golden window now 128 DRAM words (trap records + C4 data).
+- next: C7 Sv32 on: fetch fault->synthetic-cause path (cause rides fq/idex/
+  exma), mmu_d fault -> 13/15, sfence.vma SF pulse + 1-cyc req-hold, MPRV
+  eff-mode mux, tools/ptmap.py page tables, emu Sv32 via mmu_addr.translate.
+
 - next: C5 CSR+traps.
   entry; load data forward direct from l1_d DATA_O at DONE; width/sel).
 

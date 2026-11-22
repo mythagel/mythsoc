@@ -36,7 +36,7 @@ module tb_core;
 
     core dut (
         .clk(clk), .rst(rst),
-        .meip(1'b0), .seip(1'b0),
+        .meip(meip), .seip(seip),
         .m0_stb(m0_stb), .m0_sel(m0_sel), .m0_adr(m0_adr), .m0_we(m0_we),
         .m0_ack(m0_ack), .m0_dat(m0_dat),
         .m1_stb(m1_stb), .m1_sel(m1_sel), .m1_adr(m1_adr), .m1_we(m1_we),
@@ -77,9 +77,22 @@ module tb_core;
     assign m1_ack = ack1; assign m1_dat = dat1;
     assign m2_ack = ack2; assign m2_dat = dat2;
 
+    // ---------------- interrupt pins (C6): retire-pattern armed ----------------
+    // Assert meip/seip when the retiring PC matches the program's arm marker,
+    // hold LENT retires (mirrored exactly by tools/emu32.py --arm-m/--arm-s).
+    `include "tb/tb_core_irq.vh"
+    reg meip = 0, seip = 0;
+    integer mtm = 0, sts = 0;
+    always @(posedge clk) if (dut.commit) begin
+        if (dut.mawb_pc == `PC_ARM_M) begin meip <= 1; mtm <= 59; end
+        else if (meip) begin if (mtm == 0) meip <= 0; else mtm <= mtm - 1; end
+        if (dut.mawb_pc == `PC_ARM_S) begin seip <= 1; sts <= 59; end
+        else if (seip) begin if (sts == 0) seip <= 0; else sts <= sts - 1; end
+    end
+
     // ---------------- program + expectations ----------------
     integer exp [0:31];
-    integer mexp [0:95];                  // DRAM word goldens (C4)
+    integer mexp [0:127];                  // DRAM word goldens (C4)
 
     integer j2 = 0;
     integer nc = 0;                       // retired instructions
@@ -89,7 +102,7 @@ module tb_core;
 
     integer i, bad, t;
     initial begin
-        for (i = 0; i < 96; i = i + 1) mexp[i] = 32'h0;
+        for (i = 0; i < 128; i = i + 1) mexp[i] = 32'h0;
         `include "tb/tb_core_exp.vh"
         for (i = 0; i < 4096; i = i + 1) begin
             irom[i] = 32'h00000013;      // ADDI x0,x0,0 (nop) past program
@@ -161,13 +174,13 @@ module tb_core;
         if (dut.rf[30] !== exp[30]) err("C4-sh-val");       else ok("C4-sh-val");
         if (dut.rf[31] !== exp[31]) err("C4-sw-sb-sh-merge");else ok("C4-sw-sb-sh-merge");
         bad = 0;
-        for (i = 0; i < 96; i = i + 1)
+        for (i = 0; i < 128; i = i + 1)
             if (dram[i] !== mexp[i]) begin
                 bad = bad + 1;
                 $display("  mem[%0d] got %h exp %h", i, dram[i], mexp[i]);
             end
         if (bad) err("C4 dram golden");
-        else ok("C4-dram-golden96");
+        else ok("C4-dram-golden128");
         // C5 named checks: records [cause,epc,tval] at 0x80000100 + 16*i
         if (dram[64] !== 32'h00000002) err("C5-ro-write-trap");   else ok("C5-ro-write-trap");
         if (dram[68] !== 32'h00000003) err("C5-ebreak-cause");    else ok("C5-ebreak-cause");
@@ -178,11 +191,16 @@ module tb_core;
         if (dram[78] !== 32'h80000002) err("C5-mis-tval");        else ok("C5-mis-tval");
         if (dram[80] !== 32'h00000006) err("C5-sw-misalign");     else ok("C5-sw-misalign");
         if (dram[84] !== 32'h0000000B) err("C5-ecall-m");         else ok("C5-ecall-m");
-        if (dram[88] !== 32'h00000029) err("C5-deleg-ecall-s");   else ok("C5-deleg-ecall-s");
-        if (dram[92] !== 32'h00000023) err("C5-deleg-ebreak-s");  else ok("C5-deleg-ebreak-s");
+        if (dram[88] !== 32'h00000023) err("C5-deleg-ebreak-s");  else ok("C5-deleg-ebreak-s");
+        if (dram[92] !== 32'h00000009) err("C5-ecall-s-to-m");    else ok("C5-ecall-s-to-m");
         if (dut.rf[27] !== 32'h40001100) err("C5-misa");          else ok("C5-misa");
         if (dut.rf[28] !== dut.rf[29]) err("C5-mscratch-rw");     else ok("C5-mscratch-rw");
-        if (dut.rf[23] !== 32'h0000000A) err("C5-slot-count");    else ok("C5-slot-count");
+        if (dut.rf[23] !== exp[23]) err("C6-slot-count");     else ok("C6-slot-count");
+        if (dram[96] !== 32'h8000_000B) err("C6-m-int-cause");   else ok("C6-m-int-cause");
+        if (dram[100] !== 32'h8000_0029) err("C6-s-int-cause");  else ok("C6-s-int-cause");
+        if (dram[104] !== 32'h0000_0009) err("C6-s-exit-cause"); else ok("C6-s-exit-cause");
+        if (dut.rf[30] !== exp[30]) err("C6-m-counter");         else ok("C6-m-counter");
+        if (dut.rf[31] !== exp[31]) err("C6-s-counter");         else ok("C6-s-counter");
         if (dut.rf[0] !== 32'h0) err("C1 x0 nonzero");
         else ok("C1-x0-immovable");
 
