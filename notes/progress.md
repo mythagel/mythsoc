@@ -20,7 +20,14 @@
   path; a tight loop that revisits lines shows steady-state hit delivery
   1/cyc). Steady-state tight-loop COMMIT IPC = 0.667 (taken-branch redirect
   overhead on a no-prediction in-order core; expected).
-- next: C8 Sv32 regression (C8 program under satp) and/or SoC top (soc.v).
+- SoC top DONE (sim): rtl/wb_rom.v + rtl/wb_ram.v (WB B4 RAM/ROM slaves) +
+  rtl/soc.v (core -> wb_ic -> {ROM,DRAM,16550,CLINT,PLIC}; PLIC IRQ fan-in +
+  EIP->core meip/seip per design.md sec.3). tb/tb_soc.v + tb/tb_soc_fw.S:
+  firmware boots from ROM, uses DRAM (store/load/mul/div/loop), writes a
+  sentinel; TB polls the sentinel then checks DRAM 0..5 (7 checks green).
+  Proves the full SoC datapath (ROM fetch -> wb_ic -> DRAM) works.
+- next: SoC peripheral tests (UART loopback, CLINT mtime, PLIC irq->core
+  meip/seip), then firmware test suite (tests/*.S), full suite, synth.
 
 ## 2026-11-22 (session 10)
 - C2 GREEN (20 checks): M-ext single-cycle mul (dedicated signed-product

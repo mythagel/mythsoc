@@ -284,7 +284,9 @@ F. Perf: Dhrystone (embedded) cycle count -> DMIPS/MHz via TB cycle count;
   - [x] C8 Bare: dense hazard/forwarding regression (33 checks, tb/tb_c8) +
         d=1 load-use bug fix + IPC measured (1/cyc hits; 0.667 steady loop)
   - [ ] C8 Sv32 regression (C8 program under satp)
-- [ ] soc + tb (hex firmware)
+- [x] soc top (sim) + tb (hex firmware): core+wb_ic+{ROM,DRAM,16550,CLINT,
+      PLIC} wired (rtl/soc.v, wb_rom/wb_ram); tb/tb_soc 7 checks (periph
+      UART/CLINT/PLIC irq tests pending)
 - [ ] firmware: tests/*.S + build (clang)
 - [ ] full suite green
 - [ ] yosys synth + nextpnr + ecppack (bitstream) + fmax report
