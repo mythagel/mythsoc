@@ -22,7 +22,7 @@ module tb_core;
     // ---------------- memories / WB slaves ----------------
     reg [31:0] irom [0:4095];      // program (m0)
     reg [31:0] dram [0:4095];      // data    (m1; idle in C1)
-    reg [31:0] pram [0:4095];      // PT      (m2; idle in C1)
+    reg [31:0] pram [0:1048575];    // PT window (m2; 4 MB PA 0-0x3FFFFF)
 
     wire m0_stb, m0_we, m0_ack;
     wire [3:0] m0_sel;
@@ -70,7 +70,7 @@ module tb_core;
         if (m2_stb) begin
             m2_stb_cnt = m2_stb_cnt + 1;
             ack2 <= 1'b1;
-            dat2 <= pram[m2_adr[13:2]];
+            dat2 <= pram[m2_adr[21:2]];
         end else ack2 <= 1'b0;
     end
     assign m0_ack = ack0; assign m0_dat = dat0;
@@ -92,7 +92,7 @@ module tb_core;
 
     // ---------------- program + expectations ----------------
     integer exp [0:31];
-    integer mexp [0:127];                  // DRAM word goldens (C4)
+    integer mexp [0:159];                  // DRAM word goldens (C4)
 
     integer j2 = 0;
     integer nc = 0;                       // retired instructions
@@ -102,14 +102,15 @@ module tb_core;
 
     integer i, bad, t;
     initial begin
-        for (i = 0; i < 128; i = i + 1) mexp[i] = 32'h0;
+        for (i = 0; i < 160; i = i + 1) mexp[i] = 32'h0;
         `include "tb/tb_core_exp.vh"
         for (i = 0; i < 4096; i = i + 1) begin
             irom[i] = 32'h00000013;      // ADDI x0,x0,0 (nop) past program
             dram[i] = 32'h0;
-            pram[i] = 32'h0;
         end
+        for (i = 0; i < 1048576; i = i + 1) pram[i] = 32'h0;
         $readmemh("tb/tb_core.hex", irom);
+        $readmemh("tb/tb_core_pt.hex", pram);
         @(negedge clk); rst = 1;
         repeat (3) @(negedge clk); rst = 0;
 
@@ -130,8 +131,8 @@ module tb_core;
         else ok("C4-m1-traffic");
         if (m1_we_cnt == 0) err("C4 m1 no stores");
         else ok("C4-m1-stores");
-        if (m2_stb_cnt) err("C1 m2 idle (Bare)");
-        else ok("C1-m2-idle-bare");
+        if (m2_stb_cnt == 0) err("C7 m2 no walk");
+        else ok("C7-m2-walk-traffic");
         if (fq_ovf) err("fetch fifo overflow");
         else ok("C-fifo-no-ovf");
 
@@ -174,13 +175,13 @@ module tb_core;
         if (dut.rf[30] !== exp[30]) err("C4-sh-val");       else ok("C4-sh-val");
         if (dut.rf[31] !== exp[31]) err("C4-sw-sb-sh-merge");else ok("C4-sw-sb-sh-merge");
         bad = 0;
-        for (i = 0; i < 128; i = i + 1)
+        for (i = 0; i < 160; i = i + 1)
             if (dram[i] !== mexp[i]) begin
                 bad = bad + 1;
                 $display("  mem[%0d] got %h exp %h", i, dram[i], mexp[i]);
             end
         if (bad) err("C4 dram golden");
-        else ok("C4-dram-golden128");
+        else ok("C4-dram-golden160");
         // C5 named checks: records [cause,epc,tval] at 0x80000100 + 16*i
         if (dram[64] !== 32'h00000002) err("C5-ro-write-trap");   else ok("C5-ro-write-trap");
         if (dram[68] !== 32'h00000003) err("C5-ebreak-cause");    else ok("C5-ebreak-cause");
@@ -193,8 +194,8 @@ module tb_core;
         if (dram[84] !== 32'h0000000B) err("C5-ecall-m");         else ok("C5-ecall-m");
         if (dram[88] !== 32'h00000023) err("C5-deleg-ebreak-s");  else ok("C5-deleg-ebreak-s");
         if (dram[92] !== 32'h00000009) err("C5-ecall-s-to-m");    else ok("C5-ecall-s-to-m");
-        if (dut.rf[27] !== 32'h40001100) err("C5-misa");          else ok("C5-misa");
-        if (dut.rf[28] !== dut.rf[29]) err("C5-mscratch-rw");     else ok("C5-mscratch-rw");
+        if (dut.rf[17] !== 32'h40001100) err("C5-misa");          else ok("C5-misa");
+        if (dut.rf[16] !== 32'h007ff55a) err("C5-mscratch-rw");   else ok("C5-mscratch-rw");
         if (dut.rf[23] !== exp[23]) err("C6-slot-count");     else ok("C6-slot-count");
         if (dram[96] !== 32'h8000_000B) err("C6-m-int-cause");   else ok("C6-m-int-cause");
         if (dram[100] !== 32'h8000_0029) err("C6-s-int-cause");  else ok("C6-s-int-cause");

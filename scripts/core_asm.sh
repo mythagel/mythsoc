@@ -11,7 +11,7 @@ clang -c -target riscv32-unknown-elf -march=rv32im -mabi=ilp32 -o "$OBJ" "$SRC"
 clang --target=riscv32-unknown-elf -march=rv32im -mabi=ilp32 -nostdlib \
       -nostartfiles -Wl,-Ttext=0x0 -Wl,--entry=_start -o "$ELF" "$OBJ"
 llvm-objcopy -O binary "$ELF" "$BIN"
-python3 tools/emu32.py "$BIN" --hex "$HEX" --exp "$EXP" \
+python3 tools/emu32.py "$BIN" --hex "$HEX" --exp "$EXP" --pt tb/tb_core_pt.hex \
     --arm-m "$(llvm-nm "$ELF" | awk '/irq_arm_m/{print "0x"$1}')" \
     --arm-s "$(llvm-nm "$ELF" | awk '/irq_arm_s/{print "0x"$1}')"
 # TB include: interrupt arm marker addresses

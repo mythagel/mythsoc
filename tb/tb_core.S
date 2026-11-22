@@ -194,6 +194,71 @@ irq_arm_s:
     addi  x31, x31, 1
     ecall                       # SEIE/SIE cleared in s_hnd; exit to M:
                                 # medeleg[9]=0 now -> m_hnd cause9 -> M
+    # ---- C7: Sv32 translation on (page map = tools/ptmap.py) ----
+    li    x25, 0xB008
+    csrw  medeleg, x25              # delegate 3,12,13,15 to S
+    lui   x25, 0x80000
+    ori   x25, x25, 0x3FF           # SATP_A0: Sv32, asid0, root PPN 0x3FF
+    csrw  satp, x25
+    sfence.vma
+    li    x25, 0x800
+    csrs  mstatus, x25              # MPP=S
+    la    x25, c7s
+    csrw  mepc, x25
+    mret                            # -> S, first translated fetch
+c7s:
+    lui   x24, 0x10000              # 4K-alias VA base
+    lui   x25, 0xC0FF0
+    ori   x25, x25, 0x0E5           # 0xC0FF00E5
+    sw    x25, 0x100(x24)           # 4K walk -> PA 0x80001100
+    lui   x30, 0x80001
+    lw    x28, 0x100(x30)           # identity read-back of aliased PA
+    lui   x27, 0x20000              # RX-only 4M page
+    sw    x25, 0x40(x27)            # -> scause 15 (s_hnd record+skip)
+    lw    x29, 0x40(x27)            # load OK: PA 0x80000040
+    lui   x26, 0x30000              # U page
+    lw    x30, 0x40(x26)            # -> scause 13 (S, no SUM)
+    li    x25, 0x40000
+    csrs  sstatus, x25              # SUM=1
+    lw    x30, 0x40(x26)            # OK now
+    csrc  sstatus, x25              # SUM off
+    lui   x25, 0x50000              # A=0 page
+    lw    x25, 0x40(x25)            # -> 13
+    lui   x25, 0x60000              # D=0 page
+    lw    x26, 0x40(x25)            # OK
+    sw    x26, 0x40(x25)            # -> 15
+    lui   x26, 0x40000              # unmapped VA
+    la    x25, c7rec
+    csrw  sscratch, x25             # cause-12 recovery pc for s_hnd
+    jalr  x0, 0(x26)                # instruction fetch fault -> 12
+c7rec:
+    lui   x25, 0x80400
+    ori   x25, x25, 0x3FD           # SATP_A1: asid1, root 0x3FD000
+    csrw  satp, x25
+    sfence.vma
+    lui   x24, 0x10000
+    lui   x25, 0xBEEF0              # 0xBEEF0000
+    sw    x25, 0x100(x24)           # asid1 alias -> PA 0x80001100
+    lui   x27, 0x80000
+    lw    x28, 0x100(x30)           # 0xC0FF00E5 (asid0 page, PA 0x80001100)
+    lui   x31, 0x80002
+    lw    x29, 0x100(x31)           # 0xBEEF0000 (asid1 page, PA 0x80002100)
+    ecall                           # cause9 not delegated -> m_hnd -> M
+    # ---- MPRV: M data access with effective mode S ----
+    li    x25, 0x1800
+    csrc  mstatus, x25              # clear MPP
+    li    x25, 0x800
+    csrs  mstatus, x25              # MPP=S
+    lui   x25, 0x2
+    csrs  mstatus, x25              # MPRV=1
+    lui   x26, 0x30000
+    lw    x27, 0x40(x26)            # eff S vs U page, SUM=0 -> 13 (M path)
+    li    x25, 0x20000
+    csrc  mstatus, x25              # MPRV off
+    csrw  satp, x0                  # back to Bare
+    sfence.vma
+    csrr  x17, misa                 # final re-reads for named checks
+    csrr  x16, mscratch
     j     12f
     .align 4
 m_hnd:                          # M handler: rec=[cause,epc,tval]; skip; mret
@@ -218,11 +283,16 @@ m_hnd:                          # M handler: rec=[cause,epc,tval]; skip; mret
     csrs  mstatus, x26
 20: mret
     .align 4
-s_hnd:                          # S handler: same slot chain, cause|0x20, sret
-    csrr  x19, scause
+s_hnd:                          # S handler: record cause|0x20; skip (or
+    csrr  x19, scause           # recover via sscratch for fetch-fault 12)
     csrr  x20, sepc
     csrr  x21, stval
-    ori   x19, x19, 0x20
+    li    x26, 12
+    beq   x19, x26, 30f
+    addi  x20, x20, 4
+    j     31f
+30: csrr  x20, sscratch         # jump-to-unmapped recovery pc
+31: ori   x19, x19, 0x20
     slli  x25, x23, 4
     addi  x26, x22, 0x100
     add   x25, x26, x25
@@ -230,7 +300,6 @@ s_hnd:                          # S handler: same slot chain, cause|0x20, sret
     sw    x20, 4(x25)
     sw    x21, 8(x25)
     addi  x23, x23, 1
-    addi  x20, x20, 4
     csrw  sepc, x20
     li    x26, 0x200
     csrc  sie, x26              # consume: clear SEIE (mie&mideleg view)

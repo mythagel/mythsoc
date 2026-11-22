@@ -115,6 +115,7 @@ module core (
     reg  [31:0] fpc;          // next VA to fetch
     reg         mio;          // mmu req in flight (response not consumed)
     reg         pav;          // PA_O held awaiting l1_i
+    reg         pav_f;        // C7: held translation FAULTED
     reg         lio;          // l1_i req in flight / DONE not consumed
     reg         d_mio;        // discard next mmu DONE (post-redirect residue)
     reg         d_lio;        // discard next l1 DONE (post-redirect residue)
@@ -125,8 +126,10 @@ module core (
     // fetch response FIFO (4 x {pc,data}): decouples l1_i DONE pulses from
     // IF/ID stalls (divider etc). Issue rule keeps count_next + worst-case
     // in-flight arrivals <= depth: sustained 1/cyc on hits (net count 0-1).
+    localparam [31:0] FMARK = 32'h0000_000B;   // synthetic fetch-fault insn
     reg  [31:0] fq_data [0:3];
     reg  [31:0] fq_pc   [0:3];
+    reg         fq_pf   [0:3];   // C7: entry is a fetch page-fault marker
     reg  [2:0]  fq_w, fq_r;
     reg  [2:0]  fq_c;
 
@@ -138,21 +141,30 @@ module core (
 
     wire fresh_mmu = mmu_done && !(d_mio || flush);
     wire fresh_l1  = l1_done  && !(d_lio || flush);
+    wire [31:0] pc_syn = pav ? pc_pav : pc_mmu;   // VA of the synthesized marker
+    // C7: a FAULTED translation becomes a synthetic marker instruction (the
+    // page has no fetchable line); fq_pf carries the fault through the FIFO.
+    wire t_pa_v   = pav || (mio && fresh_mmu);
+    wire t_fault  = pav ? pav_f : mmu_fault;
     wire deq        = (fq_c != 3'd0) && !stall;
-    wire bypass     = fresh_l1 && (fq_c == 3'd0) && !stall;   // straight to IF/ID
-    wire enq        = fresh_l1 && !bypass;
+    wire syn      = !flush && !stall && t_pa_v && t_fault && !fresh_l1 &&
+                    ((fq_c - (deq ? 3'd1 : 3'd0)) <= 3'd3);
+    wire done_ev  = fresh_l1 | syn;
+    wire bypass     = done_ev && (fq_c == 3'd0) && !stall;   // straight to IF/ID
+    wire enq        = done_ev && !bypass;
     wire consume    = deq || bypass;
     wire [2:0] fq_c_next = fq_c + (enq ? 3'd1 : 3'd0) - (deq ? 3'd1 : 3'd0);
     wire l1_free  = !lio || (l1_done && !stall); // 1-AHEAD needs slot + no stall
     wire space    = (fq_c_next + (lio && !l1_done ? 3'd1 : 3'd0)) <= 3'd3;
-    wire req_l1   = !flush && (pav || (mio && fresh_mmu)) && l1_free && space;
-    wire req_mmu  = !flush && !pav && (!mio || (fresh_mmu && l1_free && space));
+    wire req_l1   = !flush && !syn && t_pa_v && l1_free && space;
+    wire req_mmu  = !flush && !sf_now && !sf_h && !pav && (!mio || (fresh_mmu && l1_free && space));
 
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             fpc    <= RESET_PC;
             mio    <= 1'b0;
             pav    <= 1'b0;
+            pav_f  <= 1'b0;
             lio    <= 1'b0;
             d_mio  <= 1'b0;
             d_lio  <= 1'b0;
@@ -164,13 +176,20 @@ module core (
             pc_l1  <= 32'h0;
         end else begin
             mio <= flush ? 1'b0 : (req_mmu ? 1'b1 : (mmu_done ? 1'b0 : mio));
-            pav <= flush ? 1'b0 : (req_l1 ? 1'b0 : (pav || fresh_mmu));
+            // C7 pav next: fresh consumed DIRECTLY (bypassing pav) iff no
+            // held PA and (cache|syn) took it this cycle; else it is held.
+            // pav: held translation. Cleared when taken by cache/syn, unless a
+            // fresh response replaces the held one this same cycle.
+            pav <= flush ? 1'b0 : ((req_l1 || syn) ? (fresh_mmu && pav)
+                                                   : (pav || fresh_mmu));
+            if (fresh_mmu && !((req_l1 || syn) && !pav)) pav_f <= mmu_fault;
             lio <= req_l1 ? 1'b1 : (l1_done ? 1'b0 : lio);
             d_mio <= (d_mio || (flush && mio)) && !mmu_done;
             d_lio <= (d_lio || (flush && lio)) && !l1_done;
             if (enq) begin
-                fq_data[fq_w[1:0]] <= l1_data;
-                fq_pc  [fq_w[1:0]] <= pc_l1;
+                fq_data[fq_w[1:0]] <= (syn && !fresh_l1) ? FMARK : l1_data;
+                fq_pc  [fq_w[1:0]] <= (syn && !fresh_l1) ? pc_syn : pc_l1;
+                fq_pf  [fq_w[1:0]] <= syn && !fresh_l1;
                 fq_w <= fq_w + 3'd1;
             end
             if (deq) fq_r <= fq_r + 3'd1;
@@ -178,7 +197,7 @@ module core (
             fq_c <= flush ? 3'd0 : fq_c_next;
             if (req_mmu) pc_mmu <= fpc;
             if (req_l1)  pc_l1  <= pav ? pc_pav : pc_mmu;
-            if (mmu_done && !req_l1) pc_pav <= pc_mmu;
+            if (fresh_mmu && !((req_l1 || syn) && !pav)) pc_pav <= pc_mmu;
             if (redirect)      fpc <= redirect_pc;
             else if (req_mmu)  fpc <= fpc + 32'h4;
         end
@@ -191,12 +210,12 @@ module core (
     wire [31:0] mmi_adr;
     mmu mmu_i (
         .clk(clk), .rst(rst),
-        .REQ_I(req_mmu), .VA_I(fpc),
+        .REQ_I(req_mmu), .VA_I(sf_now ? exma_res : fpc),
         .ACC_I(2'b00), .MODE_I(mmu_mode),
         .SUM_I(mstatus[18]), .MXR_I(mstatus[19]), .SATP_I(satp_r),
         .DONE_O(mmu_done), .PA_O(mmu_pa),
         .FAULT_O(mmu_fault), .CAUSE_O(mmu_cause),
-        .SF_I(2'b00), .SFASID_I(9'h0),
+        .SF_I(sf_now ? sf_typ : 2'b00), .SFASID_I(exma_d[8:0]),
         .STB_O(mmi_stb), .SEL_O(mmi_sel), .ADR_O(mmi_adr), .WE_O(mmi_we),
         .ACK_I(m2_ack), .DAT_I(m2_dat)
     );
@@ -215,12 +234,12 @@ module core (
     wire [31:0] mmd_adr;
     mmu mmu_d (
         .clk(clk), .rst(rst),
-        .REQ_I(req_md), .VA_I(ex_addr),
-        .ACC_I(idex_st ? 2'b10 : 2'b01), .MODE_I(mmu_mode),
+        .REQ_I(req_md), .VA_I(sf_now ? exma_res : ex_addr),
+        .ACC_I(idex_st ? 2'b10 : 2'b01), .MODE_I(mode_d),
         .SUM_I(mstatus[18]), .MXR_I(mstatus[19]), .SATP_I(satp_r),
         .DONE_O(mmd_done), .PA_O(mmd_pa),
         .FAULT_O(mmd_fault), .CAUSE_O(mmd_cause),
-        .SF_I(2'b00), .SFASID_I(9'h0),
+        .SF_I(sf_now ? sf_typ : 2'b00), .SFASID_I(exma_d[8:0]),
         .STB_O(mmd_stb), .SEL_O(mmd_sel), .ADR_O(mmd_adr), .WE_O(mmd_we),
         .ACK_I(m2_ack), .DAT_I(m2_dat)
     );
@@ -255,16 +274,18 @@ module core (
 
     // ------------------------------------------------------------ IF/ID
     reg         ifid_v;
+    reg         ifid_pf;      // C7: fetch page-fault marker
     reg  [31:0] ifid_pc, ifid_instr;
     always @(posedge clk or posedge rst) begin
         if (rst) begin
-            ifid_v <= 1'b0; ifid_pc <= 32'h0; ifid_instr <= 32'h0;
+            ifid_v <= 1'b0; ifid_pf <= 1'b0; ifid_pc <= 32'h0; ifid_instr <= 32'h0;
         end else if (flush) begin
             ifid_v <= 1'b0;
         end else if (!stall) begin
             ifid_v     <= consume;
-            ifid_pc    <= deq ? fq_pc[fq_r[1:0]] : pc_l1;
-            ifid_instr <= deq ? fq_data[fq_r[1:0]] : l1_data;
+            ifid_pf    <= deq ? fq_pf[fq_r[1:0]] : (syn && !fresh_l1);
+            ifid_pc    <= deq ? fq_pc[fq_r[1:0]] : (syn && !fresh_l1 ? pc_syn : pc_l1);
+            ifid_instr <= deq ? fq_data[fq_r[1:0]] : (syn && !fresh_l1 ? FMARK : l1_data);
         end
     end
 
@@ -278,6 +299,7 @@ module core (
     reg  [2:0]  idex_wd3;
     reg  [31:0] idex_d;
     reg         idex_csr, idex_sys, idex_legal;
+    reg         idex_pf;
     reg  [31:0] idex_instr, idex_addr;
     reg  [31:0] idex_pc, idex_a, idex_b, idex_off, idex_c;
     reg         exma_v, exma_wr;
@@ -289,6 +311,8 @@ module core (
     reg  [2:0]  exma_wd3_q;
     reg  [31:0] exma_pa_q, exma_d_q;
     reg         exma_csr_q, exma_sys_q, exma_legal_q;
+    reg         exma_pf_q, exma_df_q;
+    reg  [3:0]  exma_dfc_q;
     reg  [31:0] exma_instr_q, exma_addr_q;
     reg         mawb_v, mawb_wr;
     reg  [4:0]  mawb_rd;
@@ -300,8 +324,12 @@ module core (
     assign exma_jbr   = exma_jbr_q;
     assign exma_taken = exma_taken_q;
     assign exma_target = exma_target_q;
-    wire        exma_csr, exma_sys, exma_legal;
+    wire        exma_csr, exma_sys, exma_legal, exma_pf, exma_df;
+    wire [3:0]  exma_dfc;
     wire [31:0] exma_instr, exma_addr;
+    assign exma_pf  = exma_pf_q;
+    assign exma_df  = exma_df_q;
+    assign exma_dfc = exma_dfc_q;
     assign exma_csr   = exma_csr_q;
     assign exma_sys   = exma_sys_q;
     assign exma_legal = exma_legal_q;
@@ -475,36 +503,42 @@ module core (
             idex_jbr <= 1'b0; idex_jump <= 1'b0; idex_ind <= 1'b0; idex_bsel3 <= 3'h0;
             idex_mem <= 1'b0; idex_st <= 1'b0; idex_wd3 <= 3'h0; idex_d <= 32'h0;
             idex_csr <= 1'b0; idex_sys <= 1'b0; idex_legal <= 1'b0;
+            idex_pf  <= 1'b0;
             idex_instr <= 32'h0; idex_addr <= 32'h0;
             idex_pc <= 32'h0; idex_a <= 32'h0; idex_b <= 32'h0;
             idex_off <= 32'h0; idex_c <= 32'h0;
         end else if (flush) begin
             idex_v <= 1'b0; idex_wr <= 1'b0;
         end else if (!stall) begin
+            // ALL fields forced inactive on a bubble (ifid_v=0): decode of
+            // absent/garbage words must never leak X into control or data.
             idex_v    <= ifid_v;
-            idex_legal <= legal;
-            idex_csr  <= c_csr;
+            idex_legal <= ifid_v ? legal : 1'b1;
+            idex_csr  <= ifid_v && c_csr;
+            idex_pf   <= ifid_v && ifid_pf;
             idex_sys  <= ifid_v && c_sys;
-            idex_instr <= ifid_instr;
-            idex_addr <= fwd_a + d_imm;   // mem eff addr (a=rs1, b=imm for mem)
+            idex_instr <= ifid_v ? ifid_instr : 32'h0000_0013;  // nop
+            idex_addr <= ifid_v ? (fwd_a + d_imm) : 32'h0;
             idex_wr   <= ifid_v && c_wr;
-            idex_rd   <= rd;
+            idex_rd   <= ifid_v ? rd : 5'h0;
             idex_alu  <= c_alu;
             idex_jbr  <= ifid_v && c_jbr;
-            idex_jump <= c_jump;
-            idex_ind  <= c_ind;
-            idex_bsel3<= c_bsel3;
+            idex_jump <= ifid_v && c_jump;
+            idex_ind  <= ifid_v && c_ind;
+            idex_bsel3<= ifid_v ? c_bsel3 : 3'h0;
             idex_mem  <= ifid_v && c_mem;
-            idex_st   <= c_st;
-            idex_wd3  <= c_wd3;
-            idex_d    <= fwd_b;
+            idex_st   <= ifid_v && c_st;
+            idex_wd3  <= ifid_v ? c_wd3 : 3'h0;
+            idex_d    <= ifid_v ? fwd_b : 32'h0;
             idex_pc   <= ifid_pc;
-            idex_off  <= d_imm;
-            idex_c    <= fwd_a;
-            idex_a    <= (c_asrc == SRC_RS1) ? fwd_a :
+            idex_off  <= ifid_v ? d_imm : 32'h0;
+            idex_c    <= ifid_v ? fwd_a : 32'h0;
+            idex_a    <= !ifid_v ? 32'h0 :
+                         (c_asrc == SRC_RS1) ? fwd_a :
                          (c_asrc == SRC_PC)  ? ifid_pc : d_imm;
-            idex_b    <= (c_bsel == 2'd0) ? fwd_b :
-                        (c_bsel == 2'd1) ? d_imm : 32'h4;
+            idex_b    <= !ifid_v ? 32'h0 :
+                         (c_bsel == 2'd0) ? fwd_b :
+                         (c_bsel == 2'd1) ? d_imm : 32'h4;
         end
     end
 
@@ -616,19 +650,28 @@ module core (
     assign ex_addr = ex_addr_c;
 
     reg  md_mio, md_pv, d_md;
+    reg  md_pv_f;
     reg  [31:0] md_pa_r;
+    reg  [3:0]  md_pv_c;
     assign md_pa = md_pa_r;
+    wire md_fresh_fault = fresh_md ? mmd_fault  : md_pv_f;
+    wire md_fresh_cause = fresh_md ? mmd_cause : md_pv_c;
 
     wire fresh_md = mmd_done && !d_md && !flush;
     wire pa_now_c = md_pv || fresh_md;
     assign pa_wait = idex_v && idex_mem && !pa_now_c;
-    assign req_md  = idex_v && idex_mem && !md_mio && !md_pv && !d_md;
+    assign req_md  = idex_v && idex_mem && !md_mio && !md_pv && !d_md
+                      && !sf_now && !sf_h;
 
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             md_mio <= 1'b0; md_pv <= 1'b0; d_md <= 1'b0; md_pa_r <= 32'h0;
+            md_pv_f <= 1'b0; md_pv_c <= 4'h0;
         end else begin
             md_mio <= flush ? 1'b0 : (req_md ? 1'b1 : (mmd_done ? 1'b0 : md_mio));
+            md_pv_f <= flush ? 1'b0 : (fresh_md ? stall
+                                   : (md_pv_f && !stall ? 1'b1 : 1'b0));
+            if (fresh_md) md_pv_c <= mmd_cause;
             md_pv  <= flush   ? 1'b0 :
                       fresh_md ? stall     // held only if op can't advance now
                       : (md_pv && !stall) ? 1'b0   // consumed by advance
@@ -642,7 +685,8 @@ module core (
     reg  ld_mio;
     wire ma_trap_w;                                  // declared in trap engine
     assign req_ld = exma_v && exma_mem && !ld_mio && !ma_trap_w;
-    wire mem_wait_c = exma_v && exma_mem && !mld_done;
+    // faulted access (df) or sync trap: never touch the cache
+    wire mem_wait_c = exma_v && exma_mem && !ma_trap_w && !mld_done;
     assign ma_wait = mem_wait_c;
 
     always @(posedge clk or posedge rst)
@@ -713,6 +757,7 @@ module core (
             exma_mem_q <= 1'b0; exma_st_q <= 1'b0; exma_wd3_q <= 3'h0;
             exma_pa_q <= 32'h0; exma_d_q <= 32'h0;
             exma_csr_q <= 1'b0; exma_sys_q <= 1'b0; exma_legal_q <= 1'b0;
+            exma_pf_q <= 1'b0; exma_df_q <= 1'b0; exma_dfc_q <= 4'h0;
             exma_instr_q <= 32'h0; exma_addr_q <= 32'h0;
         end else if (flush) begin
             exma_v <= 1'b0; exma_wr <= 1'b0; exma_jbr_q <= 1'b0;
@@ -736,6 +781,9 @@ module core (
             exma_legal_q <= idex_legal;
             exma_instr_q <= idex_instr;
             exma_addr_q  <= idex_addr;
+            exma_pf_q    <= idex_pf;
+            exma_df_q    <= idex_v ? (fresh_md ? mmd_fault  : md_pv_f) : 1'b0;
+            exma_dfc_q   <= idex_v ? (fresh_md ? mmd_cause : md_pv_c) : 4'h0;
         end
     end
 
@@ -822,12 +870,15 @@ module core (
     wire mis_st = mem_st_op && (((x_f3 == 3'b010) && (exma_addr[1:0] != 2'b00)) ||
                                 ((x_f3 == 3'b001) &&  exma_addr[0]));
 
+    wire trap_pf   = exma_v && exma_pf;               // C7 fetch page fault
+    wire trap_df   = exma_v && exma_df && !mis_ld && !mis_st;  // C7 data pf
     wire trap_illegal = exma_v && (!exma_legal || csr_illegal || xret_priv_bad);
     wire trap_ecall   = sys_ecall_;
     wire trap_ebreak  = sys_ebreak_;
     wire trap_misld   = mis_ld;
     wire trap_misst   = mis_st;
-    assign ma_trap_w = trap_illegal | trap_misld | trap_misst | trap_ebreak | trap_ecall;
+    assign ma_trap_w = trap_pf | trap_illegal | trap_misld | trap_misst
+                     | trap_ebreak | trap_ecall | trap_df;
     assign ma_trap   = ma_trap_w;
 
     // cause/tval priority (all mutually exclusive by instruction class)
@@ -835,8 +886,10 @@ module core (
     reg [31:0] t_tval;
     always @(*) begin
         t_cause = 4'h2; t_tval = 32'h0;
-        if      (trap_misld) begin t_cause = 4'h4; t_tval = exma_addr; end
+        if      (trap_pf)    begin t_cause = 4'hc; t_tval = exma_pc;   end
+        else if (trap_misld) begin t_cause = 4'h4; t_tval = exma_addr; end
         else if (trap_misst) begin t_cause = 4'h6; t_tval = exma_addr; end
+        else if (trap_df)    begin t_cause = exma_dfc; t_tval = exma_addr; end
         else if (trap_ebreak) begin t_cause = 4'h3; t_tval = exma_pc;  end
         else if (trap_ecall) begin
             t_cause = (priv == PM) ? 4'hB : (priv == PS) ? 4'h9 : 4'h8;
@@ -866,6 +919,20 @@ module core (
     assign int_fire  = exma_v && !stall && !ma_trap && !ma_xret &&
                        !branch_committed && (int_m || int_s);
     assign int_to_s  = !int_m && int_s;
+
+    // ---------------------------------------- C7: sfence.vma + MPRV
+    wire x_sfence   = exma_v && exma_sys && (x_f7 == 7'h09);
+    wire sf_now = x_sfence && !stall;          // commit-cycle pulse
+    wire [1:0] sf_typ = (exma_res == 32'h0) ? ((exma_d == 32'h0) ? 2'b01 : 2'b10)
+                                            : 2'b11;
+    reg  sf_h;                                   // 1-cyc mmu REQ hold
+    always @(posedge clk or posedge rst)
+        if (rst) sf_h <= 1'b0; else sf_h <= sf_now;
+
+    // effective D-side mode: MPRV ? MPP : priv
+    wire [1:0] mpp_mode = (mstatus[12:11] == 2'b11) ? 2'd0 :
+                          (mstatus[12:11] == 2'b01) ? 2'd1 : 2'd2;
+    wire [1:0] mode_d   = mstatus[17] ? mpp_mode : mmu_mode;
 
     // ---------------------------------------------- C5: architectural state
     // RS/RC merge: write value = src | old (RS), old & ~src (RC), src (RW)

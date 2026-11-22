@@ -13,6 +13,8 @@ Instruction subset implemented grows with the core increments:
 Unknown/illegal opcodes stop execution with a report (never silently).
 """
 import sys, struct
+sys.path.insert(0, __file__.rsplit('/', 1)[0])
+from mmu_addr import walk
 
 MASK = 0xFFFFFFFF
 
@@ -42,7 +44,8 @@ def imm_j(insn):
     return v - (1 << 21) if v & 0x100000 else v
 
 
-def run(words, start_pc, verbose=False, arm_m=-1, arm_s=-1):
+def run(words, start_pc, verbose=False, arm_m=-1, arm_s=-1, pt=None):
+    # pt: dict word-index -> PTE word (tb/tb_core_pt.hex); Sv32 ref walk
     rf = [0] * 32
     memw = {}                      # word index -> word (DRAM model, C4)
     P = {'priv': 3, 'mstatus': 0, 'medeleg': 0, 'mideleg': 0, 'mie': 0,
@@ -117,6 +120,24 @@ def run(words, start_pc, verbose=False, arm_m=-1, arm_s=-1):
     def illegal():
         return trap(2, 0)
 
+    PTM = pt if pt else {}
+    def xlate(va, acc):
+        # effective mode for translation (MPRV affects data, not fetch)
+        if acc == 'fetch':
+            md = {3: 'M', 1: 'S', 0: 'U'}[P['priv']]
+        else:
+            eff = P['priv']
+            if (P['mstatus'] >> 17) & 1:
+                eff = (P['mstatus'] >> 11) & 3
+            md = {3: 'M', 1: 'S', 0: 'U'}.get(eff, 'U')
+        if md == 'M' or not ((P['satp'] >> 31) & 1):
+            return True, va & MASK
+        okp, pa, cz, _ = walk(P['satp'], va, lambda ba: PTM.get(ba >> 2, 0),
+                              md, acc,
+                              mxr=(P['mstatus'] >> 19) & 1,
+                              ssum=(P['mstatus'] >> 18) & 1)
+        return okp, (pa if okp else cz)
+
     pins = {'m': 0, 's': 0, 'm_to': 0, 's_to': 0}
     arm = {'m': arm_m, 's': arm_s}
     LENT = 60
@@ -143,7 +164,9 @@ def run(words, start_pc, verbose=False, arm_m=-1, arm_s=-1):
             return P['stvec'] & ~3
 
     guard = 0
-    while 0 <= pc < 4 * len(words):
+    while True:
+        if not (P['satp'] >> 31) and not (0 <= pc < 4 * len(words)):
+            break
         guard += 1
         if guard > 10000:
             print('emu32: RUNAWAY pc=%#x priv=%d mstatus=%#x' % (pc, P['priv'], P['mstatus']), file=sys.stderr)
@@ -160,7 +183,17 @@ def run(words, start_pc, verbose=False, arm_m=-1, arm_s=-1):
         g_m = P['priv'] != 3 or ((P['mstatus'] >> 3) & 1)
         g_s = P['priv'] == 0 or (P['priv'] == 1 and ((P['mstatus'] >> 1) & 1))
         icand = 'm' if (mp and g_m) else ('s' if (sp and g_s) else None)
-        insn = words[pc // 4]
+        fok, fpa = xlate(pc, 'fetch')
+        if not fok:
+            n += 1
+            if verbose:
+                print("%#010x: FETCH-FAULT %d" % (pc, fpa), file=sys.stderr)
+            pc = trap(12, pc)
+            continue
+        insn = words[fpa // 4] if 0 <= fpa // 4 < len(words) else 0x0000_000B
+        if verbose:
+            print("%#010x: %#010x prv=%d satp=%#x ms=%#x" % (pc, insn, P['priv'],
+                  P['satp'], P['mstatus']), file=sys.stderr)
         if pc == arm['m'] and not pins['m']:
             pins['m'] = 1; pins['m_to'] = LENT
         if pc == arm['s'] and not pins['s']:
@@ -291,7 +324,10 @@ def run(words, start_pc, verbose=False, arm_m=-1, arm_s=-1):
             eff = (a + imm_i) & MASK
             if (f3 == 2 and eff & 3) or (f3 == 1 and eff & 1):
                 pc = trap(4, eff); n += 1; continue
-            word = memw.get(eff >> 2, 0)
+            dok, dpa = xlate(eff, 'load')
+            if not dok:
+                pc = trap(13, eff); n += 1; continue
+            word = memw.get(dpa >> 2, 0)
             off = eff & 3
             if f3 == 0: w = sx((word >> (8 * off)) & 0xFF, 8)
             elif f3 == 1: w = sx((word >> (8 * off)) & 0xFFFF, 16)
@@ -303,11 +339,14 @@ def run(words, start_pc, verbose=False, arm_m=-1, arm_s=-1):
             off = eff & 3
             if (f3 == 2 and eff & 3) or (f3 == 1 and eff & 1):
                 pc = trap(6, eff); n += 1; continue
+            dok, dpa = xlate(eff, 'store')
+            if not dok:
+                pc = trap(15, eff); n += 1; continue
             sel = {0: 1 << off, 1: (0b1100 if off == 2 else 0b0011), 2: 0b1111}[f3]
             wd = {0: (b & 0xFF) * 0x01010101,
                   1: ((b & 0xFFFF) << 16) | (b & 0xFFFF),
                   2: b & MASK}[f3]
-            widx = eff >> 2
+            widx = dpa >> 2
             word = memw.get(widx, 0)
             mask = sum(0xFF << (8 * i) for i in range(4) if (sel >> i) & 1)
             memw[widx] = ((word & ~mask) | (wd & mask)) & MASK
@@ -352,10 +391,21 @@ def main():
         if a == "--hex":  hex_f = args[i + 1]
         if a == "--exp":  exp_f = args[i + 1]
         if a == "--start": start = int(args[i + 1], 0)
+    pt_f = None
+    for i, a in enumerate(args):
+        if a == "--pt": pt_f = args[i + 1]
+    PT = {}
+    if pt_f:
+        idx = 0
+        for ln in open(pt_f):
+            ln = ln.strip()
+            if not ln or ln.startswith('#'): continue
+            if ln.startswith('@'): idx = int(ln[1:], 16)
+            else: PT[idx] = int(ln, 16); idx += 1
     data = open(bin_f, "rb").read()
     data += b"\0" * ((4 - len(data) % 4) % 4)
     words = list(struct.unpack("<%dI" % (len(data) // 4), data))
-    rf, n, endpc, memw = run(words, start, verbose=trace, arm_m=arm_m, arm_s=arm_s)
+    rf, n, endpc, memw = run(words, start, verbose=trace, arm_m=arm_m, arm_s=arm_s, pt=PT)
     print("emu32: %d instrs, end pc=%#x" % (n, endpc))
     nz = [(i, v) for i, v in enumerate(rf) if i and v]
     print("emu32: rf non-zero: " + " ".join("x%d=%#010x" % t for t in nz))
@@ -370,7 +420,7 @@ def main():
             for i in range(32):
                 f.write("exp[%d] = 32'h%08x;\n" % (i, rf[i]))
             for k in sorted(memw):
-                if 0 <= k - 0x20000000 < 128:      # TB m1 RAM page window
+                if 0 <= k - 0x20000000 < 160:      # TB m1 RAM page window
                     f.write("mexp[%d] = 32'h%08x;\n" % (k - 0x20000000, memw[k]))
 
 if __name__ == "__main__":

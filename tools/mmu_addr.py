@@ -40,7 +40,7 @@ def pte(v=0, r=0, w=0, x=0, u=0, g=0, a=0, d=0, ppn=0):
 
 def bits(pte_w):
     v, r, w, x, u, g, a, d = ((pte_w >> i) & 1 for i in (0, 1, 2, 3, 4, 5, 6, 7))
-    ppn = (pte_w >> 10) & 0x3FFFF
+    ppn = (pte_w >> 10) & 0x3FFFFF
     return v, r, w, x, u, g, a, d, ppn
 
 
