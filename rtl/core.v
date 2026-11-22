@@ -62,6 +62,30 @@ module core (
     // operand sources
     localparam [1:0] SRC_RS1=2'd0, SRC_PC=2'd1, SRC_IMM=2'd2;
 
+    // ------------------------------------------------ C5: priv & CSR state
+    // priv arch encoding: 2'b00 U, 2'b01 S, 2'b11 M (10 reserved/unsupported)
+    localparam [1:0] PU=2'b00, PS=2'b01, PM=2'b11;
+    reg  [1:0]  priv;
+    wire [1:0]  mmu_mode = (priv == PM) ? 2'd0 : (priv == PS) ? 2'd1 : 2'd2;
+    // mstatus bits: SIE1 MIE3 SPIE5 MPIE7 SPP8 SPV9 MPP12:11 MPRV17 SUM18 MXR19
+    reg  [31:0] mstatus;
+    reg  [31:0] medeleg, mideleg, mie;
+    reg  [31:0] mtvec, mepc, mcause, mtval;
+    reg  [31:0] mscratch_r;
+    reg  [31:0] stvec, sscratch, sepc, scause, stval, satp_r;
+    reg  [31:0] stimecmp_r;
+    reg         ssip_r;
+    // mip: MEIP11/SEIP9 = pins (PLIC), SSIP1 = software-writable, others C6
+    wire [31:0] mip_r = (meip ? 32'h800 : 32'h0) | (seip ? 32'h200 : 32'h0)
+                      | (ssip_r ? 32'h2 : 32'h0);
+    localparam [31:0] MISA_VAL = 32'h40001100;   // tools/misa.py: RV32IM
+    localparam [31:0] MSTATUS_WMASK = 32'h000e1baa;
+    localparam [31:0] SSTATUS_MASK  = 32'h000c0322;
+    localparam [31:0] MEDELEG_MASK  = 32'h0000b7ff;
+    localparam [31:0] MIDELEG_MASK  = 32'h00000222;
+    localparam [31:0] MIE_MASK      = 32'h00000aaa;
+    localparam [31:0] MIP_WMASK     = 32'h00000002;
+
     // ------------------------------------------------------------ hazard ctl
     // stall: freeze ID/EX/MA/WB + IF/ID (C8: load-use). flush: kill IF/ID and
     // in-flight fetch (C3 branches/traps). redirect: load fpc (C3).
@@ -72,11 +96,15 @@ module core (
     wire        stall = div_stall | pa_wait | ma_wait;
     // C3: control transfers resolve in MA (no prediction). redirect loads
     // fpc; flush kills IF/ID + ID/EX + in-flight fetch (discard flags).
-    wire        exma_jbr, exma_taken;
+    wire        exma_jbr, exma_taken, exma_v2;
     wire [31:0] exma_target;
-    wire        redirect = exma_v && exma_jbr && exma_taken;
+    // C5: MA trap / xret also redirect (and flush younger + fetch residue)
+    wire        ma_trap, ma_xret, ma_mret;
+    wire [31:0] trap_pc, xret_pc, trap_cause, trap_tval;
+    wire        trap_to_s;
+    wire        redirect = (exma_v && exma_jbr && exma_taken) || ma_trap || ma_xret;
     wire        flush = redirect;
-    wire [31:0] redirect_pc = exma_target;
+    wire [31:0] redirect_pc = ma_trap ? trap_pc : ma_xret ? xret_pc : exma_target;
 
     // ------------------------------------------------------------ fetch (IF)
     reg  [31:0] fpc;          // next VA to fetch
@@ -138,9 +166,10 @@ module core (
             if (enq) begin
                 fq_data[fq_w[1:0]] <= l1_data;
                 fq_pc  [fq_w[1:0]] <= pc_l1;
-                fq_w <= flush ? 3'd1 : fq_w + 3'd1;
+                fq_w <= fq_w + 3'd1;
             end
-            if (deq && !flush) fq_r <= fq_r + 3'd1;
+            if (deq) fq_r <= fq_r + 3'd1;
+            if (flush) begin fq_w <= 3'd0; fq_r <= 3'd0; end
             fq_c <= flush ? 3'd0 : fq_c_next;
             if (req_mmu) pc_mmu <= fpc;
             if (req_l1)  pc_l1  <= pav ? pc_pav : pc_mmu;
@@ -158,8 +187,8 @@ module core (
     mmu mmu_i (
         .clk(clk), .rst(rst),
         .REQ_I(req_mmu), .VA_I(fpc),
-        .ACC_I(2'b00), .MODE_I(2'b00),
-        .SUM_I(1'b0), .MXR_I(1'b0), .SATP_I(32'h0),
+        .ACC_I(2'b00), .MODE_I(mmu_mode),
+        .SUM_I(mstatus[18]), .MXR_I(mstatus[19]), .SATP_I(satp_r),
         .DONE_O(mmu_done), .PA_O(mmu_pa),
         .FAULT_O(mmu_fault), .CAUSE_O(mmu_cause),
         .SF_I(2'b00), .SFASID_I(9'h0),
@@ -182,8 +211,8 @@ module core (
     mmu mmu_d (
         .clk(clk), .rst(rst),
         .REQ_I(req_md), .VA_I(ex_addr),
-        .ACC_I(idex_st ? 2'b10 : 2'b01), .MODE_I(2'b00),
-        .SUM_I(1'b0), .MXR_I(1'b0), .SATP_I(32'h0),
+        .ACC_I(idex_st ? 2'b10 : 2'b01), .MODE_I(mmu_mode),
+        .SUM_I(mstatus[18]), .MXR_I(mstatus[19]), .SATP_I(satp_r),
         .DONE_O(mmd_done), .PA_O(mmd_pa),
         .FAULT_O(mmd_fault), .CAUSE_O(mmd_cause),
         .SF_I(2'b00), .SFASID_I(9'h0),
@@ -243,6 +272,8 @@ module core (
     reg         idex_mem, idex_st;
     reg  [2:0]  idex_wd3;
     reg  [31:0] idex_d;
+    reg         idex_csr, idex_sys, idex_legal;
+    reg  [31:0] idex_instr, idex_addr;
     reg  [31:0] idex_pc, idex_a, idex_b, idex_off, idex_c;
     reg         exma_v, exma_wr;
     reg  [4:0]  exma_rd;
@@ -252,6 +283,8 @@ module core (
     reg         exma_mem_q, exma_st_q;
     reg  [2:0]  exma_wd3_q;
     reg  [31:0] exma_pa_q, exma_d_q;
+    reg         exma_csr_q, exma_sys_q, exma_legal_q;
+    reg  [31:0] exma_instr_q, exma_addr_q;
     reg         mawb_v, mawb_wr;
     reg  [4:0]  mawb_rd;
     reg  [31:0] mawb_res, mawb_pc;
@@ -262,6 +295,13 @@ module core (
     assign exma_jbr   = exma_jbr_q;
     assign exma_taken = exma_taken_q;
     assign exma_target = exma_target_q;
+    wire        exma_csr, exma_sys, exma_legal;
+    wire [31:0] exma_instr, exma_addr;
+    assign exma_csr   = exma_csr_q;
+    assign exma_sys   = exma_sys_q;
+    assign exma_legal = exma_legal_q;
+    assign exma_instr = exma_instr_q;
+    assign exma_addr  = exma_addr_q;
     assign exma_mem   = exma_mem_q;
     assign exma_st    = exma_st_q;
     assign exma_wd3   = exma_wd3_q;
@@ -289,12 +329,35 @@ module core (
     wire is_lui   = (op == 7'h37);
     wire is_auipc = (op == 7'h17);
     wire is_load  = (op == 7'h03);
+    wire is_sys   = (op == 7'h73);
     wire is_store = (op == 7'h23);
     wire is_br    = (op == 7'h63);
     wire is_jal   = (op == 7'h6F);
     wire is_jalr  = (op == 7'h67);
-    wire legal    = is_op | is_opimm | is_lui | is_auipc | is_br | is_jal | is_jalr
-                  | is_load | is_store;  // C5 traps illegal
+    // C5 legality table: bad sub-encodings (funct7/funct3/rs2 combos) trap.
+    wire alu7_ok  = (f7 == 7'h00) || (f7 == 7'h20) || (f7 == 7'h01);
+    wire op7_ok   = (f7 == 7'h00) || ((f7 == 7'h20) && ((f3 == 3'b000) || (f3 == 3'b101)))
+                  || (f7 == 7'h01);
+    wire opimm_ok = !(((f3 == 3'b001) && (f7 != 7'h00)) ||
+                      ((f3 == 3'b101) && (f7 != 7'h00) && (f7 != 7'h20)));
+    wire ld_ok    = (f3 != 3'b011) && (f3 != 3'b110) && (f3 != 3'b111);
+    wire st_ok    = (f3 == 3'b000) || (f3 == 3'b001) || (f3 == 3'b010);
+    wire br_ok    = (f3 != 3'b010) && (f3 != 3'b011);
+    wire jr_ok    = (f3 == 3'b000);
+    wire sys0     = (f3 == 3'b000);
+    wire sys_ecall  = sys0 && (f7 == 7'h00) && (rs2 == 5'd0);
+    wire sys_ebreak = sys0 && (f7 == 7'h00) && (rs2 == 5'd1);
+    wire sys_wfi    = sys0 && (f7 == 7'h02) && (rs2 == 5'd5);
+    wire sys_sfence = sys0 && (f7 == 7'h09);
+    wire sys_sret   = sys0 && (f7 == 7'h08) && (rs2 == 5'd2);
+    wire sys_mret   = sys0 && (f7 == 7'h18) && (rs2 == 5'd2);
+    wire sys_csr    = (f3 == 3'b001) || (f3 == 3'b010) || (f3 == 3'b011)
+                    || (f3 == 3'b101) || (f3 == 3'b110) || (f3 == 3'b111);
+    wire sys_ok     = sys_csr || sys_ecall || sys_ebreak || sys_wfi
+                    || sys_sfence || sys_sret || sys_mret;
+    wire legal      = (is_op & op7_ok) | (is_opimm & opimm_ok) | is_lui | is_auipc
+                    | (is_br & br_ok) | is_jal | (is_jalr & jr_ok)
+                    | (is_load & ld_ok) | (is_store & st_ok) | (is_sys & sys_ok);
 
     reg        c_wr;
     reg  [1:0] c_asrc;
@@ -306,13 +369,21 @@ module core (
     reg  [2:0] c_bsel3;
     reg        c_mem, c_st;
     reg  [2:0] c_wd3;
+    reg        c_csr, c_sys;
 
     always @(*) begin
         c_wr = 1'b0;  c_asrc = SRC_RS1; c_bsel = 2'd0; c_alu = ALU_PASS;
         d_rs1  = 5'h0;  d_rs2  = 5'h0;    d_imm = imm_i;
         c_jbr = 1'b0;   c_jump = 1'b0;    c_ind = 1'b0; c_bsel3 = 3'h0;
         c_mem = 1'b0;   c_st = 1'b0;      c_wd3 = 3'h0;
-        if (is_load) begin
+        c_csr = 1'b0;   c_sys = 1'b0;
+        if (is_sys) c_sys = sys0;
+        if (is_sys && sys_csr) begin
+            c_wr = 1'b1; c_csr = 1'b1;
+            c_asrc = f3[2] ? SRC_IMM : SRC_RS1;
+            c_bsel = 2'd1; c_alu = ALU_PASS;
+            d_imm  = {27'h0, rs1};      // zimm (rs1 field); reg form: imm unused
+        end else if (is_load) begin
             c_wr = 1'b1; c_mem = 1'b1; c_asrc = SRC_RS1; c_bsel = 2'd1;
             d_imm = imm_i; c_wd3 = f3; d_rs1 = rs1;
         end else if (is_store) begin
@@ -398,12 +469,19 @@ module core (
             idex_v <= 1'b0; idex_wr <= 1'b0; idex_rd <= 5'h0; idex_alu <= 5'h0;
             idex_jbr <= 1'b0; idex_jump <= 1'b0; idex_ind <= 1'b0; idex_bsel3 <= 3'h0;
             idex_mem <= 1'b0; idex_st <= 1'b0; idex_wd3 <= 3'h0; idex_d <= 32'h0;
+            idex_csr <= 1'b0; idex_sys <= 1'b0; idex_legal <= 1'b0;
+            idex_instr <= 32'h0; idex_addr <= 32'h0;
             idex_pc <= 32'h0; idex_a <= 32'h0; idex_b <= 32'h0;
             idex_off <= 32'h0; idex_c <= 32'h0;
         end else if (flush) begin
             idex_v <= 1'b0; idex_wr <= 1'b0;
         end else if (!stall) begin
-            idex_v    <= ifid_v && legal;
+            idex_v    <= ifid_v;
+            idex_legal <= legal;
+            idex_csr  <= c_csr;
+            idex_sys  <= ifid_v && c_sys;
+            idex_instr <= ifid_instr;
+            idex_addr <= fwd_a + d_imm;   // mem eff addr (a=rs1, b=imm for mem)
             idex_wr   <= ifid_v && c_wr;
             idex_rd   <= rd;
             idex_alu  <= c_alu;
@@ -557,7 +635,8 @@ module core (
 
     // ------------------------------------------------------ C4: MA memory
     reg  ld_mio;
-    assign req_ld = exma_v && exma_mem && !ld_mio;   // idle cycle only
+    wire ma_trap_w;                                  // declared in trap engine
+    assign req_ld = exma_v && exma_mem && !ld_mio && !ma_trap_w;
     wire mem_wait_c = exma_v && exma_mem && !mld_done;
     assign ma_wait = mem_wait_c;
 
@@ -628,6 +707,8 @@ module core (
             exma_jbr_q <= 1'b0; exma_taken_q <= 1'b0; exma_target_q <= 32'h0;
             exma_mem_q <= 1'b0; exma_st_q <= 1'b0; exma_wd3_q <= 3'h0;
             exma_pa_q <= 32'h0; exma_d_q <= 32'h0;
+            exma_csr_q <= 1'b0; exma_sys_q <= 1'b0; exma_legal_q <= 1'b0;
+            exma_instr_q <= 32'h0; exma_addr_q <= 32'h0;
         end else if (flush) begin
             exma_v <= 1'b0; exma_wr <= 1'b0; exma_jbr_q <= 1'b0;
             exma_mem_q <= 1'b0;
@@ -645,6 +726,11 @@ module core (
             exma_wd3_q   <= idex_wd3;
             exma_pa_q    <= mmd_done ? mmd_pa : md_pa;
             exma_d_q     <= idex_d;
+            exma_csr_q   <= idex_csr;
+            exma_sys_q   <= idex_sys;
+            exma_legal_q <= idex_legal;
+            exma_instr_q <= idex_instr;
+            exma_addr_q  <= idex_addr;
         end
     end
 
@@ -654,10 +740,186 @@ module core (
             mawb_v <= 1'b0; mawb_wr <= 1'b0; mawb_rd <= 5'h0; mawb_res <= 32'h0; mawb_pc <= 32'h0;
         end else if (!stall) begin
             mawb_v    <= exma_v;
-            mawb_wr   <= exma_wr;
+            mawb_wr   <= exma_wr && !ma_trap_w;   // trap kills own writeback
             mawb_rd   <= exma_rd;
-            mawb_res  <= (exma_mem && !exma_st) ? load_rdata : exma_res;
+            mawb_res  <= exma_csr ? csr_rdata
+                       : (exma_mem && !exma_st) ? load_rdata : exma_res;
             mawb_pc   <= exma_pc;
+        end
+    end
+
+    // ============================================ C5: MA trap + CSR engine
+    wire [2:0]  x_f3  = exma_instr[14:12];
+    wire [6:0]  x_f7  = exma_instr[31:25];
+    wire [4:0]  x_rs2 = exma_instr[24:20];
+    wire [11:0] x_csr = exma_instr[31:20];
+    wire [31:0] x_zimm = {27'h0, exma_instr[19:15]};
+    wire [31:0] x_src  = x_f3[2] ? x_zimm : exma_res;  // rs1 val rode ALU PASS      // wdata: zimm | rs1
+    wire        is_csr_op = exma_v && exma_csr;
+    wire        csr_wr_attempt = is_csr_op &&
+                    ((x_f3[1:0] == 2'b01) || (x_src != 32'h0)); // RW always; RS/RC if src!=0
+
+    // CSR register file (read mux)
+    reg [31:0] csr_rdata;
+    reg        csr_known, csr_ro;
+    always @(*) begin
+        csr_rdata = 32'h0; csr_known = 1'b0; csr_ro = 1'b0;
+        case (x_csr)
+            12'h300: begin csr_rdata = mstatus & MSTATUS_WMASK; csr_known = 1; end
+            12'h301: begin csr_rdata = MISA_VAL; csr_known = 1; csr_ro = 1; end
+            12'h302: begin csr_rdata = medeleg; csr_known = 1; end
+            12'h303: begin csr_rdata = mideleg; csr_known = 1; end
+            12'h304: begin csr_rdata = mie & MIE_MASK; csr_known = 1; end
+            12'h305: begin csr_rdata = mtvec; csr_known = 1; end
+            12'h340: begin csr_rdata = mscratch_r; csr_known = 1; end
+            12'h341: begin csr_rdata = mepc; csr_known = 1; end
+            12'h342: begin csr_rdata = mcause; csr_known = 1; end
+            12'h343: begin csr_rdata = mtval; csr_known = 1; end
+            12'h344: begin csr_rdata = mip_r; csr_known = 1; end
+            12'h100: begin csr_rdata = mstatus & SSTATUS_MASK; csr_known = 1; end
+            12'h104: begin csr_rdata = mie & mideleg; csr_known = 1; end
+            12'h105: begin csr_rdata = stvec; csr_known = 1; end
+            12'h140: begin csr_rdata = sscratch; csr_known = 1; end
+            12'h141: begin csr_rdata = sepc; csr_known = 1; end
+            12'h142: begin csr_rdata = scause; csr_known = 1; end
+            12'h143: begin csr_rdata = stval; csr_known = 1; end
+            12'h144: begin csr_rdata = mip_r & mideleg; csr_known = 1; end
+            12'h14D: begin csr_rdata = stimecmp_r; csr_known = 1; end
+            12'h15D: begin csr_rdata = 32'h0; csr_known = 1; end   // stimecmph (32-bit only)
+            12'h180: begin csr_rdata = satp_r; csr_known = 1; end
+            12'hF11, 12'hF12, 12'hF13, 12'hF14, 12'hF15:
+                     begin csr_rdata = 32'h0; csr_known = 1; csr_ro = 1; end
+            default: ;
+        endcase
+        if (x_csr[11:10] == 2'b11) csr_ro = 1'b1;    // hardware RO range
+    end
+
+    wire [1:0] csr_need = x_csr[9:8];                // 0=U 1=S (2,3)=M
+    wire priv_ok = (csr_need == 2'd0) ? 1'b1 :
+                   (csr_need == 2'd1) ? (priv != PU) : (priv == PM);
+    wire csr_illegal = is_csr_op && (!csr_known || !priv_ok ||
+                                     (csr_wr_attempt && csr_ro));
+
+    // SYSTEM ops at MA
+    wire sys_ecall_  = exma_v && exma_sys && (x_f7 == 7'h00) && (x_rs2 == 5'd0);
+    wire sys_ebreak_ = exma_v && exma_sys && (x_f7 == 7'h00) && (x_rs2 == 5'd1);
+    wire sys_mret_   = exma_v && exma_sys && (x_f7 == 7'h18) && (x_rs2 == 5'd2);
+    wire sys_sret_   = exma_v && exma_sys && (x_f7 == 7'h08) && (x_rs2 == 5'd2);
+    wire xret_priv_bad = (sys_mret_ && (priv != PM)) || (sys_sret_ && (priv == PU));
+    assign ma_xret = (sys_mret_ && (priv == PM)) || (sys_sret_ && (priv != PU));
+    assign ma_mret = sys_mret_ && (priv == PM);
+
+    // memory misalignment (spec Vol I 2.6: raises address-misaligned fault)
+    wire mem_ld_op = exma_v && exma_mem && !exma_st;
+    wire mem_st_op = exma_v && exma_mem &&  exma_st;
+    wire mis_ld = mem_ld_op && (((x_f3 == 3'b010) && (exma_addr[1:0] != 2'b00)) ||
+                                ((x_f3 == 3'b001) &&  exma_addr[0]));
+    wire mis_st = mem_st_op && (((x_f3 == 3'b010) && (exma_addr[1:0] != 2'b00)) ||
+                                ((x_f3 == 3'b001) &&  exma_addr[0]));
+
+    wire trap_illegal = exma_v && (!exma_legal || csr_illegal || xret_priv_bad);
+    wire trap_ecall   = sys_ecall_;
+    wire trap_ebreak  = sys_ebreak_;
+    wire trap_misld   = mis_ld;
+    wire trap_misst   = mis_st;
+    assign ma_trap_w = trap_illegal | trap_misld | trap_misst | trap_ebreak | trap_ecall;
+    assign ma_trap   = ma_trap_w;
+
+    // cause/tval priority (all mutually exclusive by instruction class)
+    reg [3:0] t_cause;
+    reg [31:0] t_tval;
+    always @(*) begin
+        t_cause = 4'h2; t_tval = 32'h0;
+        if      (trap_misld) begin t_cause = 4'h4; t_tval = exma_addr; end
+        else if (trap_misst) begin t_cause = 4'h6; t_tval = exma_addr; end
+        else if (trap_ebreak) begin t_cause = 4'h3; t_tval = exma_pc;  end
+        else if (trap_ecall) begin
+            t_cause = (priv == PM) ? 4'hB : (priv == PS) ? 4'h9 : 4'h8;
+            t_tval  = 32'h0;
+        end
+        else if (trap_illegal) begin t_cause = 4'h2; t_tval = 32'h0; end
+    end
+    assign trap_cause = {28'h0, t_cause};
+    assign trap_tval  = t_tval;
+    assign trap_to_s  = (priv != PM) && ((medeleg >> t_cause) & 32'h1);
+    assign trap_pc    = trap_to_s ? {stvec[31:2], 2'b00} : {mtvec[31:2], 2'b00};
+    assign xret_pc    = ma_mret ? {mepc[31:1], 1'b0} : {sepc[31:1], 1'b0};
+
+    // ---------------------------------------------- C5: architectural state
+    wire [31:0] mstatus_new = x_src & MSTATUS_WMASK;
+    wire [31:0] mstatus_wv  = (mstatus_new[12:11] == 2'b10)
+                            ? ((mstatus_new & ~32'h1800) | 32'h0000)  // 10 -> U
+                            : mstatus_new;
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            priv <= PM; mstatus <= 32'h0; medeleg <= 32'h0; mideleg <= 32'h0;
+            mie <= 32'h0; mtvec <= 32'h0; mscratch_r <= 32'h0; mepc <= 32'h0;
+            mcause <= 32'h0; mtval <= 32'h0; stvec <= 32'h0; sscratch <= 32'h0;
+            sepc <= 32'h0; scause <= 32'h0; stval <= 32'h0; satp_r <= 32'h0;
+            stimecmp_r <= 32'hFFFF_FFFF; ssip_r <= 1'b0;
+        end else begin
+            // --- CSR write commit (MA, non-trapping) ---
+            if (csr_wr_attempt && !csr_illegal) begin
+                case (x_csr)
+                    12'h300: mstatus <= (mstatus & ~MSTATUS_WMASK) | mstatus_wv;
+                    12'h302: medeleg <= x_src & MEDELEG_MASK;
+                    12'h303: mideleg <= x_src & MIDELEG_MASK;
+                    12'h304: mie     <= x_src & MIE_MASK;
+                    12'h305: mtvec   <= {x_src[31:1], 1'b0};   // MODE=0 direct only
+                    12'h340: mscratch_r <= x_src;
+                    12'h341: mepc    <= {x_src[31:1], 1'b0};
+                    12'h342: mcause  <= x_src;
+                    12'h343: mtval   <= x_src;
+                    12'h344: ssip_r  <= x_src[1];              // mip: SSIP writable
+                    12'h100: mstatus <= (mstatus & ~SSTATUS_MASK)
+                                     | (x_src & SSTATUS_MASK);
+                    12'h104: mie     <= (mie & ~mideleg) | (x_src & mideleg);
+                    12'h105: stvec   <= {x_src[31:1], 1'b0};
+                    12'h140: sscratch <= x_src;
+                    12'h141: sepc    <= {x_src[31:1], 1'b0};
+                    12'h142: scause  <= x_src;
+                    12'h143: stval   <= x_src;
+                    12'h14D: stimecmp_r <= x_src;
+                    12'h180: satp_r  <= {x_src[31], x_src[30:22], x_src[21:0]};
+                    default: ;
+                endcase
+            end
+            // --- trap entry (overwrites any same-instr CSR effect: trap
+            //     instrs have no CSR writes here) ---
+            if (ma_trap) begin
+                if (trap_to_s) begin
+                    sepc   <= {exma_pc[31:1], 1'b0};
+                    scause <= trap_cause;
+                    stval  <= trap_tval;
+                    mstatus[8] <= priv[0];            // SPP
+                    mstatus[5] <= mstatus[1];         // SPIE <- SIE
+                    mstatus[1] <= 1'b0;               // SIE  <- 0
+                    priv     <= PS;
+                end else begin
+                    mepc   <= {exma_pc[31:1], 1'b0};
+                    mcause <= trap_cause;
+                    mtval  <= trap_tval;
+                    mstatus[12:11] <= priv;           // MPP (arch encoding)
+                    mstatus[7] <= mstatus[3];         // MPIE <- MIE
+                    mstatus[3] <= 1'b0;               // MIE  <- 0
+                    priv     <= PM;
+                end
+            end
+            // --- xret ---
+            if (ma_xret) begin
+                if (ma_mret) begin
+                    priv           <= mstatus[12:11];
+                    mstatus[3]     <= mstatus[7];     // MIE  <- MPIE
+                    mstatus[7]     <= 1'b1;           // MPIE <- 1
+                    mstatus[12:11] <= PU;             // MPP  <- U (lowest)
+                    mstatus[17]    <= 1'b0;           // MPRV cleared on mret
+                end else begin
+                    priv          <= {1'b0, mstatus[8]};  // SPP: 0=U 1=S
+                    mstatus[1]    <= mstatus[5];      // SIE  <- SPIE
+                    mstatus[5]    <= 1'b1;            // SPIE <- 1
+                    mstatus[8]    <= 1'b0;            // SPP  <- U
+                end
+            end
         end
     end
 

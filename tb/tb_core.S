@@ -118,6 +118,76 @@ _start:
     lb    x29, 1(x22)           # 0xAA byte sign-extended (post-store)
 9:  jal   x20, 11f
 10: addi  x21, x20, 0           # x21 = link (validates jalr path ran)
-    j     12f
+    j     30f
 11: jalr  x0, 0(x20)            # return to 10
+30: # ---- C5: CSR + synchronous exceptions ----
+    lui   x22, 0x80000          # (keep DRAM base live; handler relies on it)
+    lui   x29, 0x7FF
+    ori   x29, x29, 0x55A
+    csrw  mscratch, x29
+    csrr  x28, mscratch         # must equal x29 pattern
+    csrr  x27, misa             # 0x40001100 (RO)
+    la    x24, m_hnd            # install handler BEFORE trapping tests
+    csrw  mtvec, x24
+    addi  x23, x0, 0            # M/S record slot counter
+    li    x25, -1
+    csrw  misa, x25             # write to RO -> illegal trap (rec0: cause2)
+    ebreak                      # rec1: cause3 tval=pc
+    .word 0                     # illegal encoding: rec2 cause2
+    lw    x0, 2(x22)            # misaligned load:  rec3 cause4 tval=+2
+    sw    x0, 1(x22)            # misaligned store:  rec4 cause6 tval=+1
+    ecall                       # rec5: cause11 (M ecall)
+    # --- S-mode phase: delegate ebreak(3)+ecallS(9), drop to S ---
+    la    x24, s_hnd
+    csrw  stvec, x24
+    li    x25, 0x208
+    csrw  medeleg, x25
+    li    x25, 0x800
+    csrs  mstatus, x25          # MPP <- S
+    la    x25, scode
+    csrw  mepc, x25
+    mret                        # -> S at scode, priv=S
+scode:
+    ecall                       # delegated -> S handler (rec6 cause9|0x20)
+    ebreak                      # delegated -> S handler (rec7 cause3|0x20)
+    csrw  medeleg, x0
+    ecall                       # not delegated -> M handler: cause9,
+                                # M handler sets MPP=M then mret -> M here
+    csrr  x26, sstatus          # M-mode view of sstatus (masked) - no trap
+    j     12f
+    .align 4
+m_hnd:                          # M handler: rec=[cause,epc,tval]; skip; mret
+    csrr  x19, mcause
+    csrr  x20, mepc
+    csrr  x21, mtval
+    slli  x25, x23, 4
+    addi  x26, x22, 0x100
+    add   x25, x26, x25
+    sw    x19, 0(x25)
+    sw    x20, 4(x25)
+    sw    x21, 8(x25)
+    addi  x23, x23, 1
+    addi  x20, x20, 4
+    csrw  mepc, x20
+    li    x26, 9
+    bne   x19, x26, 20f
+    li    x26, 0x1800           # ecall-from-S: return to M (MPP=M)
+    csrs  mstatus, x26
+20: mret
+    .align 4
+s_hnd:                          # S handler: same slot chain, cause|0x20, sret
+    csrr  x19, scause
+    csrr  x20, sepc
+    csrr  x21, stval
+    ori   x19, x19, 0x20
+    slli  x25, x23, 4
+    addi  x26, x22, 0x100
+    add   x25, x26, x25
+    sw    x19, 0(x25)
+    sw    x20, 4(x25)
+    sw    x21, 8(x25)
+    addi  x23, x23, 1
+    addi  x20, x20, 4
+    csrw  sepc, x20
+    sret
 12: j     12b                   # halt (self-loop)

@@ -79,7 +79,7 @@ module tb_core;
 
     // ---------------- program + expectations ----------------
     integer exp [0:31];
-    integer mexp [0:15];                  // DRAM word goldens (C4)
+    integer mexp [0:95];                  // DRAM word goldens (C4)
 
     integer j2 = 0;
     integer nc = 0;                       // retired instructions
@@ -89,7 +89,7 @@ module tb_core;
 
     integer i, bad, t;
     initial begin
-        for (i = 0; i < 16; i = i + 1) mexp[i] = 32'h0;
+        for (i = 0; i < 96; i = i + 1) mexp[i] = 32'h0;
         `include "tb/tb_core_exp.vh"
         for (i = 0; i < 4096; i = i + 1) begin
             irom[i] = 32'h00000013;      // ADDI x0,x0,0 (nop) past program
@@ -161,13 +161,28 @@ module tb_core;
         if (dut.rf[30] !== exp[30]) err("C4-sh-val");       else ok("C4-sh-val");
         if (dut.rf[31] !== exp[31]) err("C4-sw-sb-sh-merge");else ok("C4-sw-sb-sh-merge");
         bad = 0;
-        for (i = 0; i < 16; i = i + 1)
+        for (i = 0; i < 96; i = i + 1)
             if (dram[i] !== mexp[i]) begin
                 bad = bad + 1;
                 $display("  mem[%0d] got %h exp %h", i, dram[i], mexp[i]);
             end
         if (bad) err("C4 dram golden");
-        else ok("C4-dram-golden16");
+        else ok("C4-dram-golden96");
+        // C5 named checks: records [cause,epc,tval] at 0x80000100 + 16*i
+        if (dram[64] !== 32'h00000002) err("C5-ro-write-trap");   else ok("C5-ro-write-trap");
+        if (dram[68] !== 32'h00000003) err("C5-ebreak-cause");    else ok("C5-ebreak-cause");
+        if (dram[70] !== dram[69]) err("C5-ebreak-tval");
+        else ok("C5-ebreak-tval");                                 // tval = epc = pc
+        if (dram[72] !== 32'h00000002) err("C5-illegal-cause");   else ok("C5-illegal-cause");
+        if (dram[76] !== 32'h00000004) err("C5-lw-misalign");     else ok("C5-lw-misalign");
+        if (dram[78] !== 32'h80000002) err("C5-mis-tval");        else ok("C5-mis-tval");
+        if (dram[80] !== 32'h00000006) err("C5-sw-misalign");     else ok("C5-sw-misalign");
+        if (dram[84] !== 32'h0000000B) err("C5-ecall-m");         else ok("C5-ecall-m");
+        if (dram[88] !== 32'h00000029) err("C5-deleg-ecall-s");   else ok("C5-deleg-ecall-s");
+        if (dram[92] !== 32'h00000023) err("C5-deleg-ebreak-s");  else ok("C5-deleg-ebreak-s");
+        if (dut.rf[27] !== 32'h40001100) err("C5-misa");          else ok("C5-misa");
+        if (dut.rf[28] !== dut.rf[29]) err("C5-mscratch-rw");     else ok("C5-mscratch-rw");
+        if (dut.rf[23] !== 32'h0000000A) err("C5-slot-count");    else ok("C5-slot-count");
         if (dut.rf[0] !== 32'h0) err("C1 x0 nonzero");
         else ok("C1-x0-immovable");
 

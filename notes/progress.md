@@ -31,7 +31,7 @@
   objcopy -O binary without linking => every branch offset 0 (self-loop!).
   scripts/core_asm.sh now links with ld.lld (-nostdlib -Ttext=0 -e _start).
 - emu32: BRANCH/JAL/JALR + halt-on-self-loop exit.
-- next: C4 loads/stores (mmu_d pre-issue in EX + pa hold; l1_d REQ on MA
+- next: C5 CSR+traps.
   entry; load data forward direct from l1_d DATA_O at DONE; width/sel).
 
 ## 2026-11-22 (session 9)

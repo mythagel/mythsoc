@@ -30,12 +30,99 @@ def imm_s(insn):
         ((insn >> 7) & 0x1F)
     return v - (1 << 13) if v & 0x1000 else v
 
+def imm_b(insn):
+    v = (((insn >> 31) & 1) << 12) | (((insn >> 7) & 1) << 11) | \
+        (((insn >> 25) & 0x3F) << 5) | (((insn >> 8) & 0xF) << 1)
+    return v - (1 << 13) if v & 0x1000 else v
+
+
+def imm_j(insn):
+    v = (((insn >> 31) & 1) << 20) | (((insn >> 12) & 0xFF) << 12) | \
+        (((insn >> 20) & 1) << 11) | (((insn >> 21) & 0x3FF) << 1)
+    return v - (1 << 21) if v & 0x100000 else v
+
+
 def run(words, start_pc, verbose=False):
     rf = [0] * 32
     memw = {}                      # word index -> word (DRAM model, C4)
+    P = {'priv': 3, 'mstatus': 0, 'medeleg': 0, 'mideleg': 0, 'mie': 0,
+         'mtvec': 0, 'mscratch': 0, 'mepc': 0, 'mcause': 0, 'mtval': 0,
+         'stvec': 0, 'sscratch': 0, 'sepc': 0, 'scause': 0, 'stval': 0,
+         'satp': 0, 'stimecmp': 0xFFFFFFFF, 'ssip': 0}
+    MMSK, SMSK = 0x000e1baa, 0x000c0322
+    DELEGS, DELEGW, MIEM = 0x0000b7ff, 0x00000222, 0x00000aaa
     pc = start_pc
     n = 0
-    while pc in range(0, 4 * len(words), 4):
+
+    def csr_read(a):
+        m = P['mstatus']
+        return {0x300: m & MMSK, 0x301: 0x40001100, 0x302: P['medeleg'],
+                0x303: P['mideleg'], 0x304: P['mie'] & MIEM, 0x305: P['mtvec'],
+                0x340: P['mscratch'], 0x341: P['mepc'], 0x342: P['mcause'],
+                0x343: P['mtval'],
+                0x344: (0x800 if False else 0) | (0x200 if False else 0) | (2 * P['ssip']),
+                0x100: m & SMSK, 0x104: P['mie'] & P['mideleg'],
+                0x105: P['stvec'], 0x140: P['sscratch'], 0x141: P['sepc'],
+                0x142: P['scause'], 0x143: P['stval'],
+                0x144: (P['ssip'] * 2) & P['mideleg'],
+                0x14D: P['stimecmp'], 0x15D: 0, 0x180: P['satp']}.get(a, None)
+
+    def csr_write(a, v):
+        if a in (0x301, 0xF11, 0xF12, 0xF13, 0xF14, 0xF15) or (a >> 10) == 3:
+            return                              # RO
+        if a == 0x300:
+            nv = v & MMSK
+            if (nv >> 11) & 3 == 2: nv = (nv & ~0x1800)   # MPP 10 -> U
+            P['mstatus'] = (P['mstatus'] & ~MMSK) | nv
+        elif a == 0x302: P['medeleg'] = v & DELEGS
+        elif a == 0x303: P['mideleg'] = v & DELEGW
+        elif a == 0x304: P['mie'] = v & MIEM
+        elif a == 0x305: P['mtvec'] = v & ~1
+        elif a == 0x340: P['mscratch'] = v
+        elif a == 0x341: P['mepc'] = v & ~1
+        elif a == 0x342: P['mcause'] = v
+        elif a == 0x343: P['mtval'] = v
+        elif a == 0x344: P['ssip'] = (v >> 1) & 1
+        elif a == 0x100:
+            P['mstatus'] = (P['mstatus'] & ~SMSK) | (v & SMSK)
+        elif a == 0x104: P['mie'] = (P['mie'] & ~P['mideleg']) | (v & P['mideleg'])
+        elif a == 0x105: P['stvec'] = v & ~1
+        elif a == 0x140: P['sscratch'] = v
+        elif a == 0x141: P['sepc'] = v & ~1
+        elif a == 0x142: P['scause'] = v
+        elif a == 0x143: P['stval'] = v
+        elif a == 0x144: P['ssip'] = (P['ssip'] & ~(P['mideleg'] >> 1 & 1)) | ((v >> 1) & P['mideleg'] >> 1 & 1)
+        elif a in (0x14D, 0x15D): P['stimecmp'] = v if a == 0x14D else P['stimecmp']
+        elif a == 0x180: P['satp'] = v
+
+    def trap(cause, tval):
+        to_s = P['priv'] != 3 and ((P['medeleg'] >> cause) & 1)
+        if to_s:
+            P['sepc'], P['scause'], P['stval'] = pc & ~1, cause, tval
+            m = P['mstatus']
+            P['mstatus'] = (m & ~(1 << 8)) | ((P['priv'] & 1) << 8)
+            P['mstatus'] = (P['mstatus'] & ~((1 << 5) | (1 << 1))) \
+                           | (((m >> 1) & 1) << 5)
+            P['priv'] = 1
+            return P['stvec'] & ~3
+        else:
+            P['mepc'], P['mcause'], P['mtval'] = pc & ~1, cause, tval
+            P['mstatus'] = (P['mstatus'] & ~0x1800) | (P['priv'] << 11)
+            if (P['mstatus'] >> 3) & 1: P['mstatus'] |= 1 << 7
+            else: P['mstatus'] &= ~(1 << 7)
+            P['mstatus'] &= ~(1 << 3)
+            P['priv'] = 3
+            return P['mtvec'] & ~3
+
+    def illegal():
+        return trap(2, 0)
+
+    guard = 0
+    while 0 <= pc < 4 * len(words):
+        guard += 1
+        if guard > 10000:
+            print('emu32: RUNAWAY pc=%#x priv=%d mstatus=%#x' % (pc, P['priv'], P['mstatus']), file=sys.stderr)
+            break
         insn = words[pc // 4]
         op = insn & 0x7F
         rd = (insn >> 7) & 31
@@ -47,73 +134,129 @@ def run(words, start_pc, verbose=False):
         imm_u = insn & 0xFFFFF000
         f7 = (insn >> 25) & 0x7F
         a, b = rf[rs1], rf[rs2]
+
+        nxt, memevt = pc + 4, None
+        if op not in (0x37, 0x17, 0x13, 0x33, 0x03, 0x23, 0x63, 0x67, 0x6F, 0x73):
+            pc = illegal(); n += 1; continue
+        if op == 0x33 and not (f7 in (0, 0x20, 1) and (f7 != 0x20 or f3 in (0, 5))):
+            pc = illegal(); n += 1; continue
+        if op == 0x13 and not (
+                (f3 in (0, 2, 3, 4, 6, 7)) or
+                (f3 == 1 and (insn >> 25) == 0) or
+                (f3 == 5 and (insn >> 31) == 0 and ((insn >> 25) & 0x1F) == 0)):
+            pc = illegal(); n += 1; continue
+        if op == 0x03 and f3 in (3, 6, 7):
+            pc = illegal(); n += 1; continue
+        if op == 0x23 and f3 not in (0, 1, 2):
+            pc = illegal(); n += 1; continue
+        if op == 0x63 and f3 in (2, 3):
+            pc = illegal(); n += 1; continue
+        if op == 0x67 and f3 != 0:
+            pc = illegal(); n += 1; continue
+
+        if op == 0x73 and f3 == 0:                    # SYSTEM
+            if f7 == 0 and rs2 == 0:                  # ECALL
+                pc = trap({3: 11, 1: 9, 0: 8}[P['priv']], 0); n += 1; continue
+            if f7 == 0 and rs2 == 1:                  # EBREAK
+                pc = trap(3, pc); n += 1; continue
+            if f7 == 2 and rs2 == 5: pass             # WFI = nop
+            elif f7 == 9: pass                        # SFENCE.VMA = nop (C5)
+            elif f7 == 0x18 and rs2 == 2:             # MRET
+                if P['priv'] != 3: pc = illegal(); n += 1; continue
+                m = P['mstatus']
+                P['priv'] = (m >> 11) & 3
+                P['mstatus'] = (m & ~(1 << 3)) | (((m >> 7) & 1) << 3)
+                P['mstatus'] |= 1 << 7
+                P['mstatus'] &= ~0x1800
+                P['mstatus'] &= ~(1 << 17)
+                pc = P['mepc'] & ~1; n += 1; continue
+            elif f7 == 8 and rs2 == 2:                # SRET
+                if P['priv'] < 1: pc = illegal(); n += 1; continue
+                if P['priv'] == 1 and (P['mstatus'] >> 8) & 1 == 0: pass
+                m = P['mstatus']
+                P['priv'] = (m >> 8) & 1
+                P['mstatus'] = (m & ~(1 << 1)) | (((m >> 5) & 1) << 1)
+                P['mstatus'] |= 1 << 5
+                P['mstatus'] &= ~(1 << 8)
+                pc = P['sepc'] & ~1; n += 1; continue
+            else:
+                pc = illegal(); n += 1; continue
+        elif op == 0x73:                              # CSR (f3 != 0)
+            addr = (insn >> 20) & 0xFFF
+            need = (addr >> 8) & 3
+            pvok = need == 0 or (need == 1 and P['priv'] >= 1) or (need >= 2 and P['priv'] == 3)
+            old = csr_read(addr)
+            if old is None or not pvok:
+                pc = illegal(); n += 1; continue
+            src = (insn >> 15) & 31 if (f3 & 4) else a
+            ro = (addr >> 10) == 3 or addr in (0x301, 0xF11, 0xF12,
+                                               0xF13, 0xF14, 0xF15)
+            wr = (f3 in (1, 5)) or (src != 0)         # RW always; RS/RC iff src
+            if ro and wr:
+                pc = illegal(); n += 1; continue      # write to RO = illegal
+            w = old
+            if wr:
+                nv = src if f3 in (1, 5) else (old | src) if f3 in (2, 6) else (old & ~src)
+                csr_write(addr, nv & MASK)
+            rf[rd] = 0 if rd == 0 else (w & MASK)
+            n += 1; pc = (pc + 4) & MASK; continue
+
         w = None
-        if op == 0x37:                      # LUI
-            w = imm_u
-        elif op == 0x17:                    # AUIPC
-            w = (pc + imm_u) & MASK
-        elif op == 0x13:                    # OP-IMM
-            if f3 == 0:   w = (a + imm_i) & MASK          # ADDI
-            elif f3 == 1: w = (a << (imm_i & 31)) & MASK  # SLLI
-            elif f3 == 2: w = int(s(a) < s(imm_i))        # SLTI
-            elif f3 == 3: w = int(a < (imm_i & MASK))     # SLTIU
-            elif f3 == 4: w = a ^ imm_i                   # XORI
-            elif f3 == 5:
-                sh = imm_i & 31
-                w = (a >> sh) if ((insn >> 30) & 1) == 0 else ((s(a) >> sh) & MASK)
-            elif f3 == 6: w = a | imm_i                   # ORI
-            elif f3 == 7: w = a & imm_i                   # ANDI
-        elif op == 0x33 and f7 == 1:              # RV32M (Table 15/11)
-            if f3 == 0:   w = (a * b) & MASK
+        if op == 0x37: w = imm_u
+        elif op == 0x17: w = (pc + imm_u) & MASK
+        elif op == 0x13:
+            sh = imm_i & 31
+            if f3 == 0: w = (a + imm_i) & MASK
+            elif f3 == 1: w = (a << sh) & MASK
+            elif f3 == 2: w = int(s(a) < imm_i)
+            elif f3 == 3: w = int(a < (imm_i & MASK))
+            elif f3 == 4: w = (a ^ imm_i) & MASK
+            elif f3 == 5: w = ((a >> sh) & MASK) if ((insn >> 30) & 1) == 0 else ((s(a) >> sh) & MASK)
+            elif f3 == 6: w = (a | imm_i) & MASK
+            else: w = (a & imm_i) & MASK
+        elif op == 0x33 and f7 == 1:
+            if f3 == 0: w = (a * b) & MASK
             elif f3 == 1: w = (s(a) * s(b) >> 32) & MASK
             elif f3 == 2: w = (s(a) * b >> 32) & MASK
             elif f3 == 3: w = ((a * b) >> 32) & MASK
             else:
                 signed = (f3 in (4, 6))
-                if b == 0:
-                    q, r = MASK, a
-                elif signed and a == 0x80000000 and b == 0xFFFFFFFF:
-                    q, r = 0x80000000, 0
+                if b == 0: q, r = MASK, a
+                elif signed and a == 0x80000000 and b == 0xFFFFFFFF: q, r = 0x80000000, 0
                 else:
                     sa, sb = (s(a), s(b)) if signed else (a, b)
                     q = abs(sa) // abs(sb)
-                    if sa < 0 and sb > 0 or sa > 0 and sb < 0:
-                        q = -q
+                    if (sa < 0) != (sb < 0): q = -q
                     r = abs(sa) % abs(sb)
-                    if sa < 0:
-                        r = -r
+                    if sa < 0: r = -r
                     q, r = q & MASK, r & MASK
                 w = r if (f3 in (6, 7)) else q
-        elif op == 0x33:                    # OP
+        elif op == 0x33:
             sh = b & 31
-            if f3 == 0:
-                w = ((a - b) if (f7 >> 5) & 1 else (a + b)) & MASK
-            elif f3 == 1: w = (a << sh) & MASK            # SLL
-            elif f3 == 2: w = int(s(a) < s(b))            # SLT
-            elif f3 == 3: w = int(a < b)                  # SLTU
-            elif f3 == 4: w = a ^ b                       # XOR
-            elif f3 == 5:
-                sh = b & 31
-                w = (a >> sh) if ((f7 >> 5) & 1) == 0 else ((s(a) >> sh) & MASK)
-            elif f3 == 6: w = a | b                       # OR
-            elif f3 == 7: w = a & b                       # AND
-        elif op == 0x03:                            # LOAD (C4)
+            if f3 == 0: w = ((a - b) if (f7 >> 5) & 1 else (a + b)) & MASK
+            elif f3 == 1: w = (a << sh) & MASK
+            elif f3 == 2: w = int(s(a) < s(b))
+            elif f3 == 3: w = int(a < b)
+            elif f3 == 4: w = (a ^ b) & MASK
+            elif f3 == 5: w = ((a >> sh) & MASK) if ((f7 >> 5) & 1) == 0 else ((s(a) >> sh) & MASK)
+            elif f3 == 6: w = (a | b) & MASK
+            else: w = (a & b) & MASK
+        elif op == 0x03:                              # LOAD
             eff = (a + imm_i) & MASK
+            if (f3 == 2 and eff & 3) or (f3 == 1 and eff & 1):
+                pc = trap(4, eff); n += 1; continue
             word = memw.get(eff >> 2, 0)
             off = eff & 3
-            if f3 == 0:
-                w = sx((word >> (8 * off)) & 0xFF, 8)
-            elif f3 == 1:
-                w = sx((word >> (8 * off)) & 0xFFFF, 16)
-            elif f3 == 2:
-                w = word
-            elif f3 == 4:
-                w = (word >> (8 * off)) & 0xFF
-            else:
-                w = (word >> (8 * off)) & 0xFFFF
-        elif op == 0x23:                            # STORE (C4)
+            if f3 == 0: w = sx((word >> (8 * off)) & 0xFF, 8)
+            elif f3 == 1: w = sx((word >> (8 * off)) & 0xFFFF, 16)
+            elif f3 == 2: w = word
+            elif f3 == 4: w = (word >> (8 * off)) & 0xFF
+            else: w = (word >> (8 * off)) & 0xFFFF
+        elif op == 0x23:                              # STORE
             eff = (a + imm_s(insn)) & MASK
             off = eff & 3
+            if (f3 == 2 and eff & 3) or (f3 == 1 and eff & 1):
+                pc = trap(6, eff); n += 1; continue
             sel = {0: 1 << off, 1: (0b1100 if off == 2 else 0b0011), 2: 0b1111}[f3]
             wd = {0: (b & 0xFF) * 0x01010101,
                   1: ((b & 0xFFFF) << 16) | (b & 0xFFFF),
@@ -122,47 +265,30 @@ def run(words, start_pc, verbose=False):
             word = memw.get(widx, 0)
             mask = sum(0xFF << (8 * i) for i in range(4) if (sel >> i) & 1)
             memw[widx] = ((word & ~mask) | (wd & mask)) & MASK
-        elif op in (0x63, 0x67, 0x6F):              # BRANCH/JALR/JAL (C3)
-            pass
-        else:
-            print("emu32: stop at pc=%#x: unsupported insn %#010x" % (pc, insn),
-                  file=sys.stderr)
-            break
-        nxt = (pc + 4) & MASK
-        if op == 0x63:                              # BRANCH
+        elif op == 0x63:                              # BRANCH
             off = imm_b(insn)
             t = {0: a == b, 1: a != b, 4: s(a) < s(b), 5: s(a) >= s(b),
                  6: a < b, 7: a >= b}[f3]
-            if t:
-                nxt = (pc + off) & MASK
-        elif op == 0x6F:                            # JAL
+            if t: nxt = pc + off
+        elif op == 0x6F:                              # JAL
             rf[rd] = (pc + 4) & MASK if rd else 0
-            nxt = (pc + imm_j(insn)) & MASK
-        elif op == 0x67:                            # JALR
+            nxt = pc + imm_j(insn)
+        elif op == 0x67:                              # JALR
             rf[rd] = (pc + 4) & MASK if rd else 0
-            nxt = ((a + imm_i) & ~1) & MASK
+            nxt = (a + imm_i) & ~1
+
         if op not in (0x63, 0x67, 0x6F, 0x23):
             rf[rd] = 0 if rd == 0 else (w & MASK)
         n += 1
         if verbose:
-            print("%#010x: %#010x  x%d=%#010x" % (pc, insn, rd, rf[rd]),
+            print("%#010x: %#010x  x%d=%#010x prv=%d" % (pc, insn, rd, rf[rd], P['priv']),
                   file=sys.stderr)
+        nxt &= MASK
         if nxt == pc:
-            break                                   # halt self-loop
+            break
         pc = nxt
     return rf, n, pc, memw
 
-
-def imm_b(insn):
-    v = (((insn >> 31) & 1) << 12) | (((insn >> 7) & 1) << 11) | \
-        (((insn >> 25) & 0x3F) << 5) | (((insn >> 8) & 0xF) << 1)
-    return v - (1 << 13) if v & 0x1000 else v
-
-
-def imm_j(insn):
-    v = (((insn >> 31) & 1) << 20) | (((insn >> 12) & 0xFF) << 12) | \
-        (((insn >> 20) & 1) << 11) | (((insn >> 21) & 0x3FF) << 1)
-    return v - (1 << 21) if v & 0x100000 else v
 
 def main():
     args = sys.argv[1:]
@@ -192,7 +318,7 @@ def main():
             for i in range(32):
                 f.write("exp[%d] = 32'h%08x;\n" % (i, rf[i]))
             for k in sorted(memw):
-                if 0 <= k - 0x20000000 < 16:      # TB m1 RAM page window
+                if 0 <= k - 0x20000000 < 96:      # TB m1 RAM page window
                     f.write("mexp[%d] = 32'h%08x;\n" % (k - 0x20000000, memw[k]))
 
 if __name__ == "__main__":
