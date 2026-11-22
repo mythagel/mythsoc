@@ -1,5 +1,27 @@
 # progress
 
+## 2026-11-23 (session 14)
+- C8 Bare GREEN (33 checks): dense hazard/forwarding regression. tb/tb_c8.S
+  (clang) + tb/tb_c8.v, 23 controlled RAW patterns, DRAM scoreboard
+  (words 0..31) + final RF checked vs tools/emu32.py golden (tb/tb_c8_exp.vh).
+- CAUGHT + FIXED a real d=1 load-use bug (the reason C8 exists): the consumer
+  immediately after a load got the load's ADDRESS (alu_res = idex_a), not the
+  loaded data. For d=1 the consumer is in EX when the load reaches MA, so it
+  latched operands one cycle too early from the load-in-EX (whose alu_res is
+  the address); lf_a+ma_wait only covers d=2 (consumer in ID when load in MA).
+  FIX: lu_stall = consumer(ID) reads a load in EX(idex). Hold consumer in ID
+  (stall_if = stall | lu_stall, used by ifid + deq + bypass) and bubble idex
+  (idex_v<=0) so it re-latches when the load is in MA w/ mld_done (lf_a). The
+  producer load keeps advancing (stall EXCLUDES lu_stall -> no deadlock).
+  tb_core (C1-C7, 54 checks) re-run green after the fix.
+- IPC measured (probe benches, probe_*.v in /tmp/opencode/c8): frontend
+  delivers 1 instr/cyc on hits (the "1/cyc on hits" claim holds -- l1_i is
+  1-WORD lines, so a cold straight-line program is all MISSES, not the hit
+  path; a tight loop that revisits lines shows steady-state hit delivery
+  1/cyc). Steady-state tight-loop COMMIT IPC = 0.667 (taken-branch redirect
+  overhead on a no-prediction in-order core; expected).
+- next: C8 Sv32 regression (C8 program under satp) and/or SoC top (soc.v).
+
 ## 2026-11-22 (session 10)
 - C2 GREEN (20 checks): M-ext single-cycle mul (dedicated signed-product
   wires - iverilog ?: signed pitfall) + 34-cyc restoring divider (EX stall;

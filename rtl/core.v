@@ -94,6 +94,13 @@ module core (
     // l1_d DONE (load data / store ack). Younger stages freeze with it.
     wire        pa_wait, ma_wait;
     wire        stall = div_stall | pa_wait | ma_wait;
+    // C8: d=1 load-use — consumer (at ID) depends on a load sitting in EX.
+    // Hold the consumer in ID and bubble idex so it re-latches operands when
+    // the load is in MA with mld_done (lf_a path); ma_wait then covers the
+    // load-in-MA portion. stall_if is the consumer-side stall only (the
+    // producer load keeps advancing, so no deadlock).
+    wire        lu_stall;
+    wire        stall_if = stall | lu_stall;
     // C3: control transfers resolve in MA (no prediction). redirect loads
     // fpc; flush kills IF/ID + ID/EX + in-flight fetch (discard flags).
     wire        exma_jbr, exma_taken, exma_v2;
@@ -146,11 +153,11 @@ module core (
     // page has no fetchable line); fq_pf carries the fault through the FIFO.
     wire t_pa_v   = pav || (mio && fresh_mmu);
     wire t_fault  = pav ? pav_f : mmu_fault;
-    wire deq        = (fq_c != 3'd0) && !stall;
+    wire deq        = (fq_c != 3'd0) && !stall_if;
     wire syn      = !flush && !stall && t_pa_v && t_fault && !fresh_l1 &&
                     ((fq_c - (deq ? 3'd1 : 3'd0)) <= 3'd3);
     wire done_ev  = fresh_l1 | syn;
-    wire bypass     = done_ev && (fq_c == 3'd0) && !stall;   // straight to IF/ID
+    wire bypass     = done_ev && (fq_c == 3'd0) && !stall_if;   // straight to IF/ID
     wire enq        = done_ev && !bypass;
     wire consume    = deq || bypass;
     wire [2:0] fq_c_next = fq_c + (enq ? 3'd1 : 3'd0) - (deq ? 3'd1 : 3'd0);
@@ -281,7 +288,7 @@ module core (
             ifid_v <= 1'b0; ifid_pf <= 1'b0; ifid_pc <= 32'h0; ifid_instr <= 32'h0;
         end else if (flush) begin
             ifid_v <= 1'b0;
-        end else if (!stall) begin
+        end else if (!stall_if) begin
             ifid_v     <= consume;
             ifid_pf    <= deq ? fq_pf[fq_r[1:0]] : (syn && !fresh_l1);
             ifid_pc    <= deq ? fq_pc[fq_r[1:0]] : (syn && !fresh_l1 ? pc_syn : pc_l1);
@@ -512,7 +519,8 @@ module core (
         end else if (!stall) begin
             // ALL fields forced inactive on a bubble (ifid_v=0): decode of
             // absent/garbage words must never leak X into control or data.
-            idex_v    <= ifid_v;
+            // C8 lu_stall: bubble (consumer held in ID, load moved to MA).
+            idex_v    <= lu_stall ? 1'b0 : ifid_v;
             idex_legal <= ifid_v ? legal : 1'b1;
             idex_csr  <= ifid_v && c_csr;
             idex_pf   <= ifid_v && ifid_pf;
@@ -551,6 +559,13 @@ module core (
     // Youngest matching writer wins; x0 never forwards.
     // load-data forward: exma load on its l1_d DONE cycle (ma_wait keeps
     // younger stages parked until exactly this cycle).
+    // C8: d=1 load-use — consumer (ID: rs1/rs2) reads the rd of a load in
+    // EX (idex). Hold consumer in ID (stall_if) + bubble idex; the load
+    // advances to MA and ma_wait+lf_a then deliver load_rdata on re-latch.
+    wire lu_ld_ex = idex_v && idex_mem && !idex_st && (idex_rd != 5'h0) &&
+                   ((rs1 == idex_rd && rs1 != 5'h0) ||
+                    (rs2 == idex_rd && rs2 != 5'h0));
+    assign lu_stall = lu_ld_ex;
     wire lf_a = (exma_v && exma_mem && !exma_st && mld_done &&
                  (exma_rd != 5'h0) && (exma_rd == rs1));
     wire lf_b = (exma_v && exma_mem && !exma_st && mld_done &&

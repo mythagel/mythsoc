@@ -281,7 +281,9 @@ F. Perf: Dhrystone (embedded) cycle count -> DMIPS/MHz via TB cycle count;
   - [x] C5 CSRs + sync exceptions (ecall/ebreak/illegal, mret, deleg)
   - [x] C6 interrupts (mip/mie, M>S, timer/sw/external, nested M->S)
   - [x] C7 MMU on (Sv32 I+D, perm faults, A/D, sfence, 4K/4M)
-  - [ ] C8 hazards + full RV32IM regression (Bare + Sv32)
+  - [x] C8 Bare: dense hazard/forwarding regression (33 checks, tb/tb_c8) +
+        d=1 load-use bug fix + IPC measured (1/cyc hits; 0.667 steady loop)
+  - [ ] C8 Sv32 regression (C8 program under satp)
 - [ ] soc + tb (hex firmware)
 - [ ] firmware: tests/*.S + build (clang)
 - [ ] full suite green
