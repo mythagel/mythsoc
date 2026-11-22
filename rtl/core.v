@@ -67,15 +67,21 @@ module core (
     // in-flight fetch (C3 branches/traps). redirect: load fpc (C3).
     wire        div_stall;                 // iterative divide (C2)
     wire        stall = div_stall;
-    wire        flush = 1'b0;
-    wire        redirect = 1'b0;
-    wire [31:0] redirect_pc = 32'h0;
+    // C3: control transfers resolve in MA (no prediction). redirect loads
+    // fpc; flush kills IF/ID + ID/EX + in-flight fetch (discard flags).
+    wire        exma_jbr, exma_taken;
+    wire [31:0] exma_target;
+    wire        redirect = exma_v && exma_jbr && exma_taken;
+    wire        flush = redirect;
+    wire [31:0] redirect_pc = exma_target;
 
     // ------------------------------------------------------------ fetch (IF)
     reg  [31:0] fpc;          // next VA to fetch
     reg         mio;          // mmu req in flight (response not consumed)
     reg         pav;          // PA_O held awaiting l1_i
     reg         lio;          // l1_i req in flight / DONE not consumed
+    reg         d_mio;        // discard next mmu DONE (post-redirect residue)
+    reg         d_lio;        // discard next l1 DONE (post-redirect residue)
     reg  [31:0] pc_mmu;       // VA of the mmu request awaiting DONE
     reg  [31:0] pc_pav;       // VA matching the held PA_O
     reg  [31:0] pc_l1;        // VA of the l1_i request in flight
@@ -94,15 +100,17 @@ module core (
     wire        l1_done;
     wire [31:0] l1_data;
 
+    wire fresh_mmu = mmu_done && !(d_mio || flush);
+    wire fresh_l1  = l1_done  && !(d_lio || flush);
     wire deq        = (fq_c != 3'd0) && !stall;
-    wire bypass     = l1_done && (fq_c == 3'd0) && !stall;   // straight to IF/ID
-    wire enq        = l1_done && !bypass;
+    wire bypass     = fresh_l1 && (fq_c == 3'd0) && !stall;   // straight to IF/ID
+    wire enq        = fresh_l1 && !bypass;
     wire consume    = deq || bypass;
     wire [2:0] fq_c_next = fq_c + (enq ? 3'd1 : 3'd0) - (deq ? 3'd1 : 3'd0);
-    wire l1_free  = !lio || (l1_done && !stall);   // 1-AHEAD only when result lands
+    wire l1_free  = !lio || (l1_done && !stall); // 1-AHEAD needs slot + no stall
     wire space    = (fq_c_next + (lio && !l1_done ? 3'd1 : 3'd0)) <= 3'd3;
-    wire req_l1   = (pav || (mio && mmu_done)) && l1_free && space;
-    wire req_mmu  = !flush && !pav && (!mio || (mmu_done && l1_free && space));
+    wire req_l1   = !flush && (pav || (mio && fresh_mmu)) && l1_free && space;
+    wire req_mmu  = !flush && !pav && (!mio || (fresh_mmu && l1_free && space));
 
     always @(posedge clk or posedge rst) begin
         if (rst) begin
@@ -110,6 +118,8 @@ module core (
             mio    <= 1'b0;
             pav    <= 1'b0;
             lio    <= 1'b0;
+            d_mio  <= 1'b0;
+            d_lio  <= 1'b0;
             fq_w   <= 3'd0;
             fq_r   <= 3'd0;
             fq_c   <= 3'd0;
@@ -117,16 +127,18 @@ module core (
             pc_pav <= 32'h0;
             pc_l1  <= 32'h0;
         end else begin
-            mio <= req_mmu ? 1'b1 : (mmu_done ? 1'b0 : mio);
-            pav <= req_l1  ? 1'b0 : (pav || mmu_done);
-            lio <= req_l1  ? 1'b1 : (l1_done ? 1'b0 : lio);
+            mio <= flush ? 1'b0 : (req_mmu ? 1'b1 : (mmu_done ? 1'b0 : mio));
+            pav <= flush ? 1'b0 : (req_l1 ? 1'b0 : (pav || fresh_mmu));
+            lio <= req_l1 ? 1'b1 : (l1_done ? 1'b0 : lio);
+            d_mio <= (d_mio || (flush && mio)) && !mmu_done;
+            d_lio <= (d_lio || (flush && lio)) && !l1_done;
             if (enq) begin
                 fq_data[fq_w[1:0]] <= l1_data;
                 fq_pc  [fq_w[1:0]] <= pc_l1;
-                fq_w <= fq_w + 3'd1;
+                fq_w <= flush ? 3'd1 : fq_w + 3'd1;
             end
-            if (deq) fq_r <= fq_r + 3'd1;
-            fq_c <= fq_c_next;
+            if (deq && !flush) fq_r <= fq_r + 3'd1;
+            fq_c <= flush ? 3'd0 : fq_c_next;
             if (req_mmu) pc_mmu <= fpc;
             if (req_l1)  pc_l1  <= pav ? pc_pav : pc_mmu;
             if (mmu_done && !req_l1) pc_pav <= pc_mmu;
@@ -217,13 +229,21 @@ module core (
     reg         idex_v, idex_wr;
     reg  [4:0]  idex_rd;
     reg  [4:0]  idex_alu;
-    reg  [31:0] idex_pc, idex_a, idex_b;
+    reg         idex_jbr, idex_jump, idex_ind;
+    reg  [2:0]  idex_bsel3;
+    reg  [31:0] idex_pc, idex_a, idex_b, idex_off, idex_c;
     reg         exma_v, exma_wr;
     reg  [4:0]  exma_rd;
     reg  [31:0] exma_res, exma_pc;
+    reg         exma_jbr_q, exma_taken_q;
+    reg  [31:0] exma_target_q;
     reg         mawb_v, mawb_wr;
     reg  [4:0]  mawb_rd;
     reg  [31:0] mawb_res, mawb_pc;
+
+    assign exma_jbr   = exma_jbr_q;
+    assign exma_taken = exma_taken_q;
+    assign exma_target = exma_target_q;
 
     // ------------------------------------------------------------ ID decode
     wire [6:0] op   = ifid_instr[6:0];
@@ -235,25 +255,44 @@ module core (
 
     wire [31:0] imm_i = {{20{ifid_instr[31]}}, ifid_instr[31:20]};
     wire [31:0] imm_u = {ifid_instr[31:12], 12'h0};
+    wire [31:0] imm_b = {{19{ifid_instr[31]}}, ifid_instr[31], ifid_instr[7],
+                         ifid_instr[30:25], ifid_instr[11:8], 1'b0};
+    wire [31:0] imm_j = {{11{ifid_instr[31]}}, ifid_instr[31], ifid_instr[19:12],
+                         ifid_instr[20], ifid_instr[30:21], 1'b0};
 
     wire is_op    = (op == 7'h33);
     wire is_opimm = (op == 7'h13);
     wire is_lui   = (op == 7'h37);
     wire is_auipc = (op == 7'h17);
-    wire legal    = is_op | is_opimm | is_lui | is_auipc; // C5: trap on !legal
+    wire is_br    = (op == 7'h63);
+    wire is_jal   = (op == 7'h6F);
+    wire is_jalr  = (op == 7'h67);
+    wire legal    = is_op | is_opimm | is_lui | is_auipc | is_br | is_jal | is_jalr; // C5 traps illegal
 
     reg        c_wr;
     reg  [1:0] c_asrc;
-    reg        c_bsrc;   // 0=rs2, 1=imm
+    reg  [1:0] c_bsel;  // 0=rs2(fwd), 1=imm, 2=const 4
     reg  [4:0] c_alu;
     reg  [4:0] d_rs1, d_rs2;
     reg  [31:0] d_imm;
+    reg        c_jbr, c_jump, c_ind;
+    reg  [2:0] c_bsel3;
 
     always @(*) begin
-        c_wr   = 1'b0;  c_asrc = SRC_RS1; c_bsrc = 1'b0; c_alu = ALU_PASS;
+        c_wr = 1'b0;  c_asrc = SRC_RS1; c_bsel = 2'd0; c_alu = ALU_PASS;
         d_rs1  = 5'h0;  d_rs2  = 5'h0;    d_imm = imm_i;
-        if (is_op && (f7 == 7'h01)) begin           // M extension (f7=0x01)
-            c_wr = 1'b1; c_asrc = SRC_RS1; c_bsrc = 1'b0;
+        c_jbr = 1'b0;   c_jump = 1'b0;    c_ind = 1'b0; c_bsel3 = 3'h0;
+        if (is_br) begin
+            c_jbr = 1'b1; c_asrc = SRC_RS1; c_bsel = 2'd0; d_imm = imm_b;
+            c_bsel3 = f3;
+        end else if (is_jal) begin
+            c_wr = 1'b1; c_jbr = 1'b1; c_jump = 1'b1;
+            c_asrc = SRC_PC; c_bsel = 2'd2; c_alu = ALU_ADD; d_imm = imm_j;
+        end else if (is_jalr) begin
+            c_wr = 1'b1; c_jbr = 1'b1; c_jump = 1'b1; c_ind = 1'b1;
+            c_asrc = SRC_PC; c_bsel = 2'd2; c_alu = ALU_ADD; d_imm = imm_i;
+        end else if (is_op && (f7 == 7'h01)) begin   // M extension (f7=0x01)
+            c_wr = 1'b1; c_asrc = SRC_RS1; c_bsel = 2'd0;
             d_rs1 = rs1; d_rs2 = rs2;
             case (f3)
                 3'b000: c_alu = ALU_MUL;    3'b001: c_alu = ALU_MULH;
@@ -262,7 +301,7 @@ module core (
                 3'b110: c_alu = ALU_REM;    3'b111: c_alu = ALU_REMU;
             endcase
         end else if (is_op) begin
-            c_wr = 1'b1; c_asrc = SRC_RS1; c_bsrc = 1'b0;
+            c_wr = 1'b1; c_asrc = SRC_RS1; c_bsel = 2'd0;
             d_rs1 = rs1; d_rs2 = rs2;
             case (f3)
                 3'b000: c_alu = f7[5] ? ALU_SUB : ALU_ADD;
@@ -275,7 +314,7 @@ module core (
                 3'b111: c_alu = ALU_AND;
             endcase
         end else if (is_opimm) begin
-            c_wr = 1'b1; c_asrc = SRC_RS1; c_bsrc = 1'b1; d_rs1 = rs1;
+            c_wr = 1'b1; c_asrc = SRC_RS1; c_bsel = 2'd1; d_rs1 = rs1;
             case (f3)
                 3'b000: c_alu = ALU_ADD;
                 3'b001: c_alu = ALU_SLL;
@@ -289,7 +328,7 @@ module core (
         end else if (is_lui) begin
             c_wr = 1'b1; c_asrc = SRC_IMM; c_alu = ALU_PASS; d_imm = imm_u;
         end else if (is_auipc) begin
-            c_wr = 1'b1; c_asrc = SRC_PC; c_bsrc = 1'b1; c_alu = ALU_ADD;
+            c_wr = 1'b1; c_asrc = SRC_PC; c_bsel = 2'd1; c_alu = ALU_ADD;
             d_imm = imm_u;
         end
     end
@@ -321,7 +360,9 @@ module core (
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             idex_v <= 1'b0; idex_wr <= 1'b0; idex_rd <= 5'h0; idex_alu <= 5'h0;
+            idex_jbr <= 1'b0; idex_jump <= 1'b0; idex_ind <= 1'b0; idex_bsel3 <= 3'h0;
             idex_pc <= 32'h0; idex_a <= 32'h0; idex_b <= 32'h0;
+            idex_off <= 32'h0; idex_c <= 32'h0;
         end else if (flush) begin
             idex_v <= 1'b0; idex_wr <= 1'b0;
         end else if (!stall) begin
@@ -329,10 +370,17 @@ module core (
             idex_wr   <= ifid_v && c_wr;
             idex_rd   <= rd;
             idex_alu  <= c_alu;
+            idex_jbr  <= ifid_v && c_jbr;
+            idex_jump <= c_jump;
+            idex_ind  <= c_ind;
+            idex_bsel3<= c_bsel3;
             idex_pc   <= ifid_pc;
+            idex_off  <= d_imm;
+            idex_c    <= fwd_a;
             idex_a    <= (c_asrc == SRC_RS1) ? fwd_a :
                          (c_asrc == SRC_PC)  ? ifid_pc : d_imm;
-            idex_b    <= c_bsrc ? d_imm : fwd_b;
+            idex_b    <= (c_bsel == 2'd0) ? fwd_b :
+                        (c_bsel == 2'd1) ? d_imm : 32'h4;
         end
     end
 
@@ -399,7 +447,8 @@ module core (
             drem <= 33'h0; dquo <= 32'h0; ddiv <= 32'h0; dnd <= 32'h0;
             dqs <= 1'b0; drs <= 1'b0;
         end else begin
-            case (ds)
+            if (flush && is_div) ds <= D_IDLE;   // killed div: abort FSM
+            else case (ds)
             D_IDLE: if (is_div && !div_sp) begin
                 ds   <= D_RUN;
                 dc   <= 5'h0;
@@ -447,18 +496,37 @@ module core (
         (idex_alu == ALU_PASS)    ? idex_a :
         is_div                    ? div_res : 32'h0;
 
+    // ------------------------------------------------ EX: branch/jump (C3)
+    // taken/target computed in EX, committed (redirect+flush) in MA.
+    wire cond_eq  = (idex_a == idex_b);
+    wire cond_lt  = ($signed(idex_a) < $signed(idex_b));
+    wire cond_ltu = (idex_a < idex_b);
+    wire ex_taken = idex_jump ? 1'b1 :
+                    (idex_bsel3 == 3'b000) ?  cond_eq  :
+                    (idex_bsel3 == 3'b001) ? ~cond_eq  :
+                    (idex_bsel3 == 3'b100) ?  cond_lt  :
+                    (idex_bsel3 == 3'b101) ? ~cond_lt  :
+                    (idex_bsel3 == 3'b110) ?  cond_ltu :
+                    (idex_bsel3 == 3'b111) ? ~cond_ltu : 1'b0;
+    wire [31:0] ex_target = idex_ind ? ((idex_c + idex_off) & ~32'h1)
+                                     : (idex_pc + idex_off);
+
     // ------------------------------------------------------------ EX/MA
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             exma_v <= 1'b0; exma_wr <= 1'b0; exma_rd <= 5'h0; exma_res <= 32'h0; exma_pc <= 32'h0;
+            exma_jbr_q <= 1'b0; exma_taken_q <= 1'b0; exma_target_q <= 32'h0;
         end else if (flush) begin
-            exma_v <= 1'b0; exma_wr <= 1'b0;
+            exma_v <= 1'b0; exma_wr <= 1'b0; exma_jbr_q <= 1'b0;
         end else if (!stall) begin
             exma_v    <= idex_v;
             exma_wr   <= idex_wr;
             exma_rd   <= idex_rd;
             exma_res  <= alu_res;
             exma_pc   <= idex_pc;
+            exma_jbr_q   <= idex_jbr;
+            exma_taken_q <= ex_taken;
+            exma_target_q <= ex_target;
         end
     end
 

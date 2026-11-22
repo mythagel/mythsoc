@@ -68,13 +68,38 @@ _start:
     remu   x14, x2, x16         # -> dividend
     lui   x17, 0x80000          # x17 = 0x8000_0000 (INT_MIN)
     addi  x19, x0, -1           # x19 = -1
-    div    x18, x17, x19        # overflow -> quotient = dividend
-    rem    x20, x17, x19        # overflow -> remainder = 0
+    div    x26, x17, x19        # overflow -> quotient = dividend
+    rem    x27, x17, x19        # overflow -> remainder = 0
     divu   x21, x17, x2         # 0x80000000 edge unsigned
     remu   x22, x17, x2
     divu   x23, x2, x17         # quotient 0 remainder = dividend
     remu   x24, x2, x17
     mul    x25, x17, x19        # MIN * -1 low32
-    mulhu  x26, x17, x19        # MIN * 0xFFFFFFFF unsigned high
-    addi  x0, x0, 0             # nop
-    addi  x0, x0, 0
+    mulhu  x28, x17, x19        # MIN * 0xFFFFFFFF unsigned high
+    # ---- C3: control flow (branch taken/not-taken, jal/jalr, loop) ----
+    addi  x13, x0, 0            # acc
+    addi  x14, x0, 1            # i
+    addi  x15, x0, 11           # n
+1:  add   x13, x13, x14         # sum 1..10 backward loop
+    addi  x14, x14, 1
+    blt   x14, x15, 1b
+    addi  x16, x0, 0
+    beq   x16, x0, 2f           # taken forward
+    addi  x16, x0, 99           # must NOT execute
+2:  bne   x16, x0, 3f           # not taken
+    addi  x17, x0, 42           # executes (x17 overwritten: fine)
+3:  jal   x1, 5f                # call subroutine
+4:  addi  x19, x0, 7            # after return
+    j     6f
+5:  add   x18, x13, x13         # body: 2*acc
+    jalr  x0, 0(x1)             # return
+6:  bltu  x17, x16, 7f          # 42<0 false: not taken
+    bgeu  x17, x16, 8f          # 42>=0 true: taken
+7:  addi  x21, x0, 111          # must NOT execute
+8:  blt   x16, x17, 9f          # 0<42 taken
+    addi  x21, x0, 222          # must NOT execute
+9:  jal   x20, 11f
+10: addi  x21, x20, 0           # x21 = link (validates jalr path ran)
+    j     12f
+11: jalr  x0, 0(x20)            # return to 10
+12: j     12b                   # halt (self-loop)

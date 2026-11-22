@@ -18,6 +18,22 @@
   exma(d=2) / mawb(d=3) / rf(d>=4). C1 never caught this (dist>=4 + x0s).
 - next: C3 (branches/jal/jalr, MA redirect, fetch discard on flush).
 
+## 2026-11-22 (session 11)
+- C3 GREEN (27 checks): branch/jal/jalr resolved in MA (no prediction);
+  redirect loads fpc + flush kills younger (ifid/idex) + fetch-discard
+  flags d_mio/d_lio drop stale in-flight mmu/cache responses; FIFO emptied;
+  divider aborts if flushed while running (stale-D_DONE would capture
+  garbage into EX/MA - guard `if (flush && is_div) ds<=D_IDLE`).
+  C3 bugs found via trace: (a) req_l1 fired with STALE pav on the flush
+  cycle -> gated !flush; (b) d_lio missing `&& !l1_done` clear -> stuck
+  discard, fetch dead after 2nd loop iteration.
+- BUILD FIX: clang -c leaves R_RISCV_BRANCH relocs ZERO-FILLED in .o bytes;
+  objcopy -O binary without linking => every branch offset 0 (self-loop!).
+  scripts/core_asm.sh now links with ld.lld (-nostdlib -Ttext=0 -e _start).
+- emu32: BRANCH/JAL/JALR + halt-on-self-loop exit.
+- next: C4 loads/stores (mmu_d pre-issue in EX + pa hold; l1_d REQ on MA
+  entry; load data forward direct from l1_d DATA_O at DONE; width/sel).
+
 ## 2026-11-22 (session 9)
 - C1 GREEN: rtl/core.v (IF/ID/EX/MA/WB, fetch=mmu_i->l1_i 1-ahead ctrl,
   regfile 2R+2W, EX/MA+MA/WB forwarding, RV32I straight-line ALU) +

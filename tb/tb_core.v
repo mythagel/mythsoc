@@ -131,8 +131,16 @@ module tb_core;
         if (dut.rf[10] !== exp[10]) err("C2-remu");       else ok("C2-remu");
         if (dut.rf[11] !== exp[11]) err("C2-div-by-zero");else ok("C2-div-by-zero");
         if (dut.rf[12] !== exp[12]) err("C2-rem-by-zero");else ok("C2-rem-by-zero");
-        if (dut.rf[18] !== exp[18]) err("C2-div-overflow");else ok("C2-div-overflow");
-        if (dut.rf[20] !== exp[20]) err("C2-rem-overflow");else ok("C2-rem-overflow");
+        if (dut.rf[26] !== exp[26]) err("C2-div-overflow");else ok("C2-div-overflow");
+        if (dut.rf[27] !== exp[27]) err("C2-rem-overflow");else ok("C2-rem-overflow");
+        // C3 named checks (taken/not-taken paths, call/return)
+        if (dut.rf[13] !== exp[13]) err("C3-loop-acc");      else ok("C3-loop-acc");
+        if (dut.rf[14] !== exp[14]) err("C3-loop-idx");      else ok("C3-loop-idx");
+        if (dut.rf[16] !== exp[16]) err("C3-beq-taken");     else ok("C3-beq-taken");
+        if (dut.rf[17] !== exp[17]) err("C3-bne-nottaken");  else ok("C3-bne-nottaken");
+        if (dut.rf[18] !== exp[18]) err("C3-jal-sub");       else ok("C3-jal-sub");
+        if (dut.rf[19] !== exp[19]) err("C3-jalr-ret");      else ok("C3-jalr-ret");
+        if (dut.rf[21] !== exp[21]) err("C3-branch-skip");   else ok("C3-branch-skip");
         if (dut.rf[0] !== 32'h0) err("C1 x0 nonzero");
         else ok("C1-x0-immovable");
 
