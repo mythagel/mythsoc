@@ -8,8 +8,10 @@
 // {WE,ADR,DAT} valid on the STB cycle, waits ACK_I (any latency >= 1),
 // 1 outstanding. No STALL/ERR/CYC (wb_ic sec.6 protocol).
 //
-// Request interface (from MA; 1 outstanding):
-//   REQ_I 1-cycle pulse, asserted only while idle (DONE_O low).
+// Request interface (from MA; 1 outstanding, 1-ahead on DONE):
+//   REQ_I is a 1-cycle pulse, asserted while idle (DONE_O low) OR
+//   during the previous transfer's DONE cycle (hit or miss; DATA_O is
+//   a held register, sampled the DONE cycle).
 //   WEN_I: 0=load, 1=store; WDAT_I valid on REQ for stores.
 //   load hit  : DONE_O 1 cycle after REQ (latency 1); DATA_O valid.
 //   load miss : WB read, line filled, DONE 1 cycle after memory ACK
@@ -38,7 +40,7 @@ module l1_d (
     input [31:0] DAT_I
 );
 
-    localparam W_IDLE = 3'd0, W_W1S = 3'd1, W_W1W = 3'd2, W_RESP = 3'd3;
+    localparam W_IDLE = 3'd0, W_W1S = 3'd1, W_W1W = 3'd2;
     reg [1:0] st;
 
     reg        v   [0:1023];
@@ -100,9 +102,8 @@ module l1_d (
                     DATA_O <= DAT_I;
                 end
                 DONE_O <= 1'b1;
-                st <= W_RESP;
+                st <= W_IDLE;  // DONE cycle accepts 1-ahead REQ (hit or miss)
             end
-            W_RESP: st <= W_IDLE;
             default: ;
             endcase
         end

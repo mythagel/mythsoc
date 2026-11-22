@@ -1,5 +1,45 @@
 # progress
 
+## 2026-11-22 (session 10)
+- C2 GREEN (20 checks): M-ext single-cycle mul (dedicated signed-product
+  wires - iverilog ?: signed pitfall) + 34-cyc restoring divider (EX stall;
+  1 load + 32 iter + 1 D_DONE; D_DONE cycle alu_res = final -> EX/MA capture).
+  Div-zero/overflow = 1-cycle special path (Table 11: quo all1/dividend).
+- FETCH redesign: 1-slot resp buffer insufficient (DONE pulse overwritten
+  during long stalls -> lost instructions, proven by trace). Now 4-deep
+  in-order fetch FIFO {pc,data} w/ bypass + space-gated issue; sustained
+  1 instr/cyc on hits; guard check C-fifo-no-ovf.
+- FORWARDING redesign (the big one): EX-input forwarding ONLY works for
+  fixed 1-cyc spacing. With fetch bubbles (every cold miss) the producer is
+  in mawb at the consumer's ID->EX latch edge -> rf sample = pre-write value
+  (write is the SAME edge) -> stale operand, no forward source left.
+  FIX = ID-side mux at operand latch, sources youngest-first:
+  idex(alu_res, d=1; safe for mul/div: latch only on !stall edges) /
+  exma(d=2) / mawb(d=3) / rf(d>=4). C1 never caught this (dist>=4 + x0s).
+- next: C3 (branches/jal/jalr, MA redirect, fetch discard on flush).
+
+## 2026-11-22 (session 9)
+- C1 GREEN: rtl/core.v (IF/ID/EX/MA/WB, fetch=mmu_i->l1_i 1-ahead ctrl,
+  regfile 2R+2W, EX/MA+MA/WB forwarding, RV32I straight-line ALU) +
+  tb/tb_core.v (7 checks: 31-reg golden vs tools/emu32.py of clang-assembled
+  tb/tb_core.S, x0, WB protocol/idle). Flow: scripts/core_asm.sh =
+  clang -c -target riscv32-unknown-elf -march=rv32i -> llvm-objcopy -O
+  binary -> emu32 golden .vh + $readmemh hex.
+- FIXED l1_i/l1_d: miss DONE sat in W_RESP -> REQ on a miss's DONE cycle was
+  IGNORED (core lost a request: fetch deadlock). W_RESP folded into W_IDLE
+  (DONE=1cyc pulse via default-0 reg; DATA_O held until next REQ). Both TBs
+  re-run green. l1_d had the same latent bug (would hit it in C4).
+- iverilog -g2005 GOTCHA (probe /tmp/opencode/sra_probe.v): `$signed(x)>>>sh`
+  INSIDE a `?:` chain evaluates WRONG (logical not arithmetic); keep signed
+  ops on dedicated wires, ternary selects only.
+- iverilog gotchas hit again: task $monitor hierarchical refs; use dut.sig.
+- emu32.py = reference model (sign-extend 12-bit imm; mask every w on store;
+  python `not x & 1` precedence trap -> use (x & 1) == 0).
+- LESSON: golden-vs-DUT mismatches localized via one python tool check,
+  never mental math (caught emu s() double-sign-extend + RTL SRA via probe).
+- next: C2 (M-ext: single-cycle mul via dedicated signed-product wires;
+  32-cycle iterative div w/ EX stall; Table 11 div-zero/overflow semantics).
+
 ## 2026-11-21 (session 8)
 - core task decomposed -> notes/core.md (8 ordered pieces C1-C8, each RTL
   increment + TB group, green-before-next). Strategy: full datapath built

@@ -64,8 +64,9 @@ Spec: unpriv Ch.2 (RV32I, Table 13).
 ### C2. M extension
 MUL MULH MULHSU MULHU DIV DIVU REM REMU.
 Done: 8 ops; div-by-zero (quotient=all-ones, rem=dividend);
-overflow INT_MIN/−1 (quotient=0, rem=0); unsigned 0x80000000 edges.
-Spec: unpriv Ch.12 (Table 15 RV32M).
+overflow INT_MIN/-1 (quotient=DIVIDEND=0x80000000, rem=0) [unpriv Table 11,
+NOT 0 as earlier note said]; unsigned 0x80000000 edges.
+Spec: unpriv Ch.12 (Table 15 RV32M, Table 11 div semantics).
 
 ### C3. branches + jumps + flush
 BEQ BNE BLT BGE BLTU BGEU JAL JALR.
