@@ -274,13 +274,13 @@ F. Perf: Dhrystone (embedded) cycle count -> DMIPS/MHz via TB cycle count;
 - [x] l1_i & l1_d fully pipelined: verified sustained 1.0 hit/cyc (DONE pulses
       in IDLE; no change needed); tb +I11 (28), +D11 (24)
 - [ ] core + tb (plan: notes/core.md)
-  - [ ] C1 fetch+decode+R/I ALU (+LUI/AUIPC), straight-line, Bare
-  - [ ] C2 M ext (MUL/DIV/REM x4 + H/HSU/HU)
-  - [ ] C3 branches+jumps+younger flush
-  - [ ] C4 loads/stores via l1_d (+l1_i in IF), misaligned trap
-  - [ ] C5 CSRs + sync exceptions (ecall/ebreak/illegal, mret, deleg)
-  - [ ] C6 interrupts (mip/mie, M>S, timer/sw/external, nested M->S)
-  - [ ] C7 MMU on (Sv32 I+D, perm faults, A/D, sfence, 4K/4M)
+  - [x] C1 fetch+decode+R/I ALU (+LUI/AUIPC), straight-line, Bare
+  - [x] C2 M ext (MUL/DIV/REM x4 + H/HSU/HU)
+  - [x] C3 branches+jumps+younger flush
+  - [x] C4 loads/stores via l1_d (+l1_i in IF), misaligned trap
+  - [x] C5 CSRs + sync exceptions (ecall/ebreak/illegal, mret, deleg)
+  - [x] C6 interrupts (mip/mie, M>S, timer/sw/external, nested M->S)
+  - [x] C7 MMU on (Sv32 I+D, perm faults, A/D, sfence, 4K/4M)
   - [ ] C8 hazards + full RV32IM regression (Bare + Sv32)
 - [ ] soc + tb (hex firmware)
 - [ ] firmware: tests/*.S + build (clang)

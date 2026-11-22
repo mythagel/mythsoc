@@ -47,7 +47,20 @@
   exma), mmu_d fault -> 13/15, sfence.vma SF pulse + 1-cyc req-hold, MPRV
   eff-mode mux, tools/ptmap.py page tables, emu Sv32 via mmu_addr.translate.
 
-- next: C5 CSR+traps.
+## 2026-11-22 (session 13)
+- C5 (49) + C6 (54) + C7 (54) GREEN, full suite green. Core now RV32IM
+  + M/S/U + traps + delegation + PLIC-pin interrupts + Sv32 (4K/4M, asid,
+  sfence, A/D-faults, SUM/MXR/MPRV) — RTL == emu32 golden bit-exact on a
+  618-instruction bare-metal program with 18 synchronous + 2 interrupt
+  traps and 12 translated accesses.
+- C7 bugs: pram 1MB + zero-init ($readmemh leaves X holes -> phantom X
+  faults); mmu_addr bits() PPN mask 18b->22b (PA>=0x4000_0000 truncated);
+  fetch syn-marker path: pav/pav_f replacement algebra (held-vs-fresh);
+  Verilog has NO 0x literals (32'h..); md_pv_f missing reset entry.
+- emu32 = full arch model now (CSR/trap/int windows --arm-m/s, Sv32 --pt,
+  records via mexp window). scripts/core_asm.sh: clang+ld.lld+llvm-nm+ptmap.
+- next: C8 (IPC measurement + dense RAW chains + final regression pass).
+
   entry; load data forward direct from l1_d DATA_O at DONE; width/sel).
 
 ## 2026-11-22 (session 9)
