@@ -272,6 +272,25 @@ module tb_l1_d;
         else
             err("D10: stb/ack balanced");
 
+        // ---- D11 sustained load-hit throughput (1.0 load-hit/cyc):
+        // back-to-back load REQ on consecutive cycles to 2 resident lines.
+        dc_req(32'h00004000, 1'b0, 32'h0);   // fill set 0, word 0x1000
+        dc_req(32'h00004004, 1'b0, 32'h0);   // fill set 1, word 0x1001
+        stb_tot = 0; ack_cnt = 0; stb_cnt = 0; rc = 0;
+        @(negedge clk);
+        while (DONE) @(negedge clk);
+        REQ = 1; PA_I = 32'h00004000; WEN = 0; WDI = 32'h0;        // load A
+        @(posedge clk); #1;
+        PA_I = 32'h00004004;                                       // load B
+        if (DONE && DATAO === 32'h00001000) ok("D11: b2b load A"); else err("D11: b2b load A");
+        @(posedge clk); #1;
+        if (DONE && DATAO === 32'h00001001) ok("D11: b2b load B"); else err("D11: b2b load B");
+        @(posedge clk); #1;
+        REQ = 0;
+        if (DONE) ok("D11: b2b load C"); else err("D11: b2b load C");
+        if (stb_cnt === 0) ok("D11: b2b no stb"); else err("D11: b2b no stb");
+
+        // ---- summary
         $display("============================================");
         $display("TB L1D: %0d passes, %0d errors (cyc=%0d)",
                  passes, errors, cyc);

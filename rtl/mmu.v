@@ -4,13 +4,18 @@
 // reference walk model live in tools/mmu_addr.py (source of truth for
 // tb/tb_mmu.v expectations).
 //
-// Request protocol: REQ_I is a 1-cycle pulse, asserted only in an idle
-// cycle (DONE_O low). SF_I must never coincide with REQ_I (core serializes
-// sfence.vma and the following access). The requester samples PA_O/FAULT_O/
-// CAUSE_O while DONE_O is high.
-//   hit / M-mode / Bare : DONE 2 cycles after REQ
-//   miss 4M            : 5 cycles (1 PTE read, 1-cyc slave)
-//   miss 4K            : 7 cycles (2 PTE reads, 1-cyc slave)
+// Request protocol (1-ahead pipelined): REQ_I is a 1-cycle pulse, asserted
+// in an idle cycle (DONE_O low) OR during the previous request's DONE cycle
+// (DONE_O high). Not accepted during a walk. SF_I must never coincide with
+// REQ_I and must not coincide with a walk-starting REQ (core serializes
+// sfence.vma). The requester samples PA_O/FAULT_O/CAUSE_O while DONE_O is
+// high (1 cycle each). Sustained hit rate = 1 translation/cycle.
+//   DONE is presented the cycle the last PTE ACK lands (miss) / after REQ
+//   (hit / M-mode / Bare):
+//     hit / M-mode / Bare : DONE 1 cycle after REQ
+//     miss 4M            : DONE 3 cycles after REQ (1 PTE read, 1-cyc slave)
+//     miss 4K            : DONE 5 cycles after REQ (2 PTE reads, 1-cyc slave)
+//   STB cycles from REQ: hit/M/Bare = 0, 4M = 1, 4K = 2.
 // Response: PA_O (don't-care on fault), FAULT_O, CAUSE_O (12/13/15).
 //
 // Translation (Sv32, LEVELS=2):
@@ -42,6 +47,10 @@
 //   must not create entries the sfence invalidates). satp change:
 //   NO auto-flush (software sfence.vma).
 // WB B4: read-only, STB asserted 1 cycle per PTE, waits ACK_I (any latency).
+//
+// Pipelined timing: the result + TLB fill are computed combinationally from
+// the incoming PTE (DAT_I) in the ACK cycle, so no S_R bubble remains:
+//   hit/Bare DONE on REQ+1; 4M DONE on L1-ACK+1; 4K DONE on L0-ACK+1.
 `default_nettype none
 
 module mmu (
@@ -52,7 +61,7 @@ module mmu (
     input  [1:0]  MODE_I,   // 0=M 1=S 2=U
     input        SUM_I, MXR_I,
     input  [31:0] SATP_I,   // MODE[31] ASID[30:22] PPN[21:0]
-    output reg   DONE_O,
+    output       DONE_O,
     output reg [31:0] PA_O,
     output reg   FAULT_O,
     output reg [3:0] CAUSE_O,
@@ -92,18 +101,12 @@ module mmu (
 
     // ------------------------------------------------------------- FSM / regs
     localparam S_IDLE = 3'd0, S_W1S = 3'd1, S_W1W = 3'd2,
-               S_W2S = 3'd3, S_W2W = 3'd4, S_R = 3'd5, S_RESP = 3'd6;
+               S_W2S = 3'd3, S_W2W = 3'd4, S_RESP = 3'd5;
     reg [2:0] st;
     reg [31:0] va_r, satp_r, pte0a_r;
     reg  [1:0]  acc_r, mode_r;
     reg        sum_r, mxr_r;
     reg  [8:0]  asid_r;
-    reg  [31:0] pte1_r, pte0_r;
-    reg        from1;             // R: result from L1 PTE (4M / L1 fault)
-    // result (latched in R or IDLE-hit; presented leaving RESP)
-    reg        res_ok;
-    reg  [31:0] res_pa;
-    reg  [3:0]  res_cause;
     // sf pending (latched while walking; applied at walk end, post-fill)
     reg        sf_p;
     reg  [1:0]  sf_cls_p;
@@ -210,7 +213,7 @@ module mmu (
                                    SUM_I, MXR_I);
     wire        mbare = !SATP_I[31] || MODE_I == 2'd0;
     wire [3:0]  cause_req = (ACC_I == 2'd0) ? 4'd12 :
-                            (ACC_I == 2'd1) ? 4'd13 : 4'd15;
+                             (ACC_I == 2'd1) ? 4'd13 : 4'd15;
 
     // ------------------------------------------------------------- PTE addrs
     wire [33:0] a1  = {12'b0, satp_r[21:0], 12'b0} + {22'b0, va_r[31:22], 2'b0};
@@ -223,33 +226,44 @@ module mmu (
     // W1W decode (structural): leaf = R|X; reserved perms = R=0,W=1
     wire        w1_leaf = DAT_I[1] | DAT_I[3];
     wire        w1_bad = !DAT_I[0] ||
-                         (!DAT_I[1] && DAT_I[2]) ||
-                         (!DAT_I[1] && !DAT_I[3] &&
-                          (DAT_I[7] | DAT_I[6] | DAT_I[4]));
+                          (!DAT_I[1] && DAT_I[2]) ||
+                          (!DAT_I[1] && !DAT_I[3] &&
+                           (DAT_I[7] | DAT_I[6] | DAT_I[4]));
 
-    // ------------------------------------------------------------- R compute
-    wire [31:0] pte_c = from1 ? pte1_r : pte0_r;
-    wire [21:0] pc_ppn = pte_c[31:10];
-    wire pc_v = pte_c[0], pc_r = pte_c[1], pc_w = pte_c[2], pc_x = pte_c[3];
-    wire pc_u = pte_c[4], pc_g = pte_c[5], pc_a = pte_c[6], pc_d = pte_c[7];
-    wire pc_leaf = pc_r | pc_x;
-    wire r_bad = !pc_v || (!pc_r && pc_w) ||
-                 (!pc_leaf && (pc_d | pc_a | pc_u)) ||
-                 (from1 && pc_leaf && pc_ppn[9:0] != 10'd0) ||
-                 (!from1 && !pc_leaf);
-    wire [31:0] pa_c = from1 ? {pc_ppn[19:10], va_r[21:0]} :
-                                       {pc_ppn[19:0], va_r[11:0]};
-    wire r_pf = chk_fault(acc_r, mode_r, pc_r, pc_w, pc_x, pc_u, pc_a, pc_d,
-                          sum_r, mxr_r);
-    wire [3:0]  cause_r = (acc_r == 2'd0) ? 4'd12 :
+    // -------------------------------------------------- incoming PTE compute
+    // PTE = DAT_I (the word the WB read just returned). frm_eff is known per
+    // state: 1 in W1W (4M leaf), 0 in W2W (4K leaf). Computed combinationally
+    // so the result + fill are ready the same cycle the PTE ACK lands.
+    wire        frm_eff = (st == S_W1W);
+    wire [31:0] pte_i   = DAT_I;
+    wire [21:0] pi_ppn  = pte_i[31:10];
+    wire pi_v = pte_i[0], pi_r = pte_i[1], pi_w = pte_i[2], pi_x = pte_i[3];
+    wire pi_u = pte_i[4], pi_g = pte_i[5], pi_a = pte_i[6], pi_d = pte_i[7];
+    wire pi_leaf = pi_r | pi_x;
+    wire r_bad_i = !pi_v ||
+                   (!pi_r && pi_w) ||
+                   (!pi_leaf && (pi_d | pi_a | pi_u)) ||
+                   (frm_eff && pi_leaf && pi_ppn[9:0] != 10'd0) ||
+                   (!frm_eff && !pi_leaf);
+    wire [31:0] pa_i = frm_eff ? {pi_ppn[19:10], va_r[21:0]} :
+                                    {pi_ppn[19:0], va_r[11:0]};
+    wire r_pf_i = chk_fault(acc_r, mode_r, pi_r, pi_w, pi_x, pi_u, pi_a, pi_d,
+                            sum_r, mxr_r);
+    wire [3:0]  cause_i = (acc_r == 2'd0) ? 4'd12 :
                           (acc_r == 2'd1) ? 4'd13 : 4'd15;
+    wire fl_ok_i = !r_bad_i;
 
-    // fill fields (valid in R, applied leaving R)
-    wire        fl_ok = !r_bad;
-    wire [1:0]  f1s = from1 ? va_r[21:20] : va_r[13:12];
-    wire [4:0]  f2s = from1 ? {2'b00, va_r[22:20]} : va_r[16:12];
-    wire [17:0] f1t = from1 ? {8'b0, va_r[31:22]} : va_r[31:14];
-    wire [14:0] f2t = from1 ? {5'b0, va_r[31:22]} : va_r[31:17];
+    // 1-ahead: DONE_O is high for the S_RESP cycle (1 cycle per serviced req).
+    // A new REQ may arrive during S_RESP (sampled at the leaving edge): hit
+    // latches its result and stays in S_RESP (DONE next cycle); miss latches
+    // ctx and starts a walk. Sustained rate on hits = 1 translation/cycle.
+    assign DONE_O = (st == S_RESP);
+
+    // ------------------------------------------------------------- fill idx
+    wire [1:0]  f1s = frm_eff ? va_r[21:20] : va_r[13:12];
+    wire [4:0]  f2s = frm_eff ? {2'b00, va_r[22:20]} : va_r[16:12];
+    wire [17:0] f1t = frm_eff ? {8'b0, va_r[31:22]} : va_r[31:14];
+    wire [14:0] f2t = frm_eff ? {5'b0, va_r[31:22]} : va_r[31:17];
     reg  [1:0]  fw1;
     integer     k1;
     always @(*) begin
@@ -268,6 +282,10 @@ module mmu (
     end
     wire [3:0] fe1 = {f1s, fw1};
     wire [7:0] fe2 = {f2s, fw2};
+    // fill only on a structurally-valid LEAF PTE (4M in W1W, 4K in W2W)
+    wire do_fill = fl_ok_i &&
+                   (((st == S_W1W) && ACK_I && w1_leaf) ||
+                    ((st == S_W2W) && ACK_I));
 
     // sfence sources: sfa = pending (latched mid-walk), sfb = direct input
     reg  [1:0]  sfa_cls;
@@ -289,13 +307,9 @@ module mmu (
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             st <= S_IDLE;
-            DONE_O <= 1'b0;
             PA_O <= 32'h0;
             FAULT_O <= 1'b0;
             CAUSE_O <= 4'h0;
-            res_ok <= 1'b0;
-            res_pa <= 32'h0;
-            res_cause <= 4'h0;
             sf_p <= 1'b0;
             lru <= 4'd0;
             for (i = 0; i < 16; i = i + 1)
@@ -317,9 +331,7 @@ module mmu (
             S_IDLE: begin
                 if (REQ_I) begin
                     if (mbare) begin
-                        res_ok <= 1'b1;
-                        res_pa <= VA_I;
-                        res_cause <= 4'h0;
+                        PA_O <= VA_I; FAULT_O <= 1'b0; CAUSE_O <= 4'h0;
                         st <= S_RESP;
                     end else if (!h_hit) begin
                         va_r <= VA_I;
@@ -331,19 +343,19 @@ module mmu (
                         asid_r <= SATP_I[30:22];
                         st <= S_W1S;
                     end else begin
-                        res_ok <= !sfault;
-                        res_pa <= pa_hit;
-                        res_cause <= cause_req;
+                        PA_O <= pa_hit; FAULT_O <= sfault;
+                        CAUSE_O <= cause_req;
                         st <= S_RESP;
                     end
                 end
             end
             S_W1S: st <= S_W1W;
             S_W1W: if (ACK_I) begin
-                pte1_r <= DAT_I;
                 if (w1_bad || w1_leaf) begin
-                    from1 <= 1'b1;
-                    st <= S_R;
+                    // 4M terminal result (frm_eff=1), computed from DAT_I
+                    PA_O <= pa_i; FAULT_O <= !(fl_ok_i && !r_pf_i);
+                    CAUSE_O <= cause_i;
+                    st <= S_RESP;
                 end else begin
                     pte0a_r <= a2c[31:0];
                     st <= S_W2S;
@@ -351,40 +363,57 @@ module mmu (
             end
             S_W2S: st <= S_W2W;
             S_W2W: if (ACK_I) begin
-                pte0_r <= DAT_I;
-                from1 <= 1'b0;
-                st <= S_R;
-            end
-            S_R: begin
-                res_ok <= fl_ok && !r_pf;
-                res_pa <= pa_c;
-                res_cause <= cause_r;
-                if (fl_ok) begin
-                    l1_v[fe1] <= 1'b1;
-                    l1_tag[fe1] <= f1t;
-                    l1_sz[fe1] <= from1;
-                    l1_g[fe1] <= pc_g;
-                    l1_asid[fe1] <= asid_r;
-                    l1_pa12[fe1] <= pa_c[31:12];
-                    l1_r[fe1] <= pc_r; l1_w[fe1] <= pc_w; l1_x[fe1] <= pc_x;
-                    l1_u[fe1] <= pc_u; l1_a[fe1] <= pc_a; l1_d[fe1] <= pc_d;
-                    l1_st[fe1] <= lru;
-                    l2_v[fe2] <= 1'b1;
-                    l2_tag[fe2] <= f2t;
-                    l2_sz[fe2] <= from1;
-                    l2_g[fe2] <= pc_g;
-                    l2_asid[fe2] <= asid_r;
-                    l2_pa12[fe2] <= pa_c[31:12];
-                    l2_r[fe2] <= pc_r; l2_w[fe2] <= pc_w; l2_x[fe2] <= pc_x;
-                    l2_u[fe2] <= pc_u; l2_a[fe2] <= pc_a; l2_d[fe2] <= pc_d;
-                    l2_st[fe2] <= lru;
-                    lru <= lru + 1'b1;
-                end
+                // 4K terminal result (frm_eff=0), computed from DAT_I
+                PA_O <= pa_i; FAULT_O <= !(fl_ok_i && !r_pf_i);
+                CAUSE_O <= cause_i;
                 st <= S_RESP;
             end
-            S_RESP: st <= S_IDLE;
+            S_RESP: begin
+                // 1-ahead: accept a new request during this DONE cycle
+                if (REQ_I) begin
+                    if (mbare) begin
+                        PA_O <= VA_I; FAULT_O <= 1'b0; CAUSE_O <= 4'h0;
+                    end else if (!h_hit) begin
+                        va_r <= VA_I;
+                        satp_r <= SATP_I;
+                        acc_r <= ACC_I;
+                        mode_r <= MODE_I;
+                        sum_r <= SUM_I;
+                        mxr_r <= MXR_I;
+                        asid_r <= SATP_I[30:22];
+                        st <= S_W1S;
+                    end else begin
+                        PA_O <= pa_hit; FAULT_O <= sfault;
+                        CAUSE_O <= cause_req;
+                    end
+                end else
+                    st <= S_IDLE;
+            end
             default: ;
             endcase
+
+            // TLB fill: in the present cycle (4M in W1W, 4K in W2W)
+            if (do_fill) begin
+                l1_v[fe1] <= 1'b1;
+                l1_tag[fe1] <= f1t;
+                l1_sz[fe1] <= frm_eff;
+                l1_g[fe1] <= pi_g;
+                l1_asid[fe1] <= asid_r;
+                l1_pa12[fe1] <= pa_i[31:12];
+                l1_r[fe1] <= pi_r; l1_w[fe1] <= pi_w; l1_x[fe1] <= pi_x;
+                l1_u[fe1] <= pi_u; l1_a[fe1] <= pi_a; l1_d[fe1] <= pi_d;
+                l1_st[fe1] <= lru;
+                l2_v[fe2] <= 1'b1;
+                l2_tag[fe2] <= f2t;
+                l2_sz[fe2] <= frm_eff;
+                l2_g[fe2] <= pi_g;
+                l2_asid[fe2] <= asid_r;
+                l2_pa12[fe2] <= pa_i[31:12];
+                l2_r[fe2] <= pi_r; l2_w[fe2] <= pi_w; l2_x[fe2] <= pi_x;
+                l2_u[fe2] <= pi_u; l2_a[fe2] <= pi_a; l2_d[fe2] <= pi_d;
+                l2_st[fe2] <= lru;
+                lru <= lru + 1'b1;
+            end
 
             // sfence flush: after fill above, so a pending/direct sfence
             // beats an in-flight walk's fill (spec: speculative walks must
@@ -420,14 +449,6 @@ module mmu (
                        {l2_tag[i], i[7:3]} == sfb_va[31:12]) ||
                       (l2_sz[i] == 1'b1 && l2_tag[i][9:0] == sfb_va[31:22]))))
                     l2_v[i] <= 1'b0;
-            end
-
-            // outputs (presented leaving RESP; DONE and data same edge)
-            DONE_O <= (st == S_RESP);
-            if (st == S_RESP) begin
-                PA_O <= res_pa;
-                FAULT_O <= !res_ok;
-                CAUSE_O <= res_cause;
             end
         end
     end

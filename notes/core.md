@@ -14,16 +14,20 @@ Reference models in tools/: mmu_addr.py (Sv32 walk), addr.py (WB decode),
 csr_list.py (CSR addresses), misa.py (misa reset).
 
 ## Already-tested blocks (interfaces fixed; core only consumes, do not re-derive)
-- **rtl/mmu.v** — Sv32 walker+TLB, WB RO master (SoC m2). 59 checks.
+- **rtl/mmu.v** — Sv32 walker+TLB, WB RO master (SoC m2/m3, per-side). 67 checks.
   In : REQ, VA, ACC[1:0] (0=fetch 1=load 2=store 3=amo), MODE[1:0] (0=M 1=S 2=U),
         SUM, MXR, SATP, SF[1:0], SFASID
   Out: DONE, PA, FAULT, CAUSE[3:0] (12/13/15)
-  Latency from REQ: hit 2 cyc; 4M miss 5; 4K miss 7 (1-cyc slave).
-- **rtl/l1_i.v** — 4 KiB I-cache, WB RO master (m0). 23 checks.
-  In : REQ, PA, INVAL   Out: DONE, DATA   hit 1 cyc; miss 3; INVAL flushes all.
+  Latency from REQ: hit 1 cyc; 4M miss 3; 4K miss 5 (1-cyc slave).
+  1-AHEAD: REQ may be asserted during the prior DONE cycle -> sustained
+  1 translation/cyc on hits. IF must pipeline PC and hold the in-flight VA
+  through the walk (1 outstanding). SF held pending if it races a walk.
+- **rtl/l1_i.v** — 4 KiB I-cache, WB RO master (m0). 28 checks.
+  In : REQ, PA, INVAL   Out: DONE, DATA   hit 1 cyc (sustained 1/cyc); miss 3;
+  INVAL flushes all. 1 outstanding on the miss path.
 - **rtl/l1_d.v** — 4 KiB D-cache, write-through no-allocate, WB RW master (m1).
-  20 checks. In : REQ, PA, WEN, WDAT   Out: DONE, DATA
-  load hit 1; load miss / store 3.
+  24 checks. In : REQ, PA, WEN, WDAT   Out: DONE, DATA
+  load hit 1 (sustained 1/cyc); load miss / store 3. 1 outstanding.
 
 ## Core structure — one module rtl/core.v, sub-blocks
 1. **regfile** — 32×32; 3 read (ID) + 2 write (MA, WB); same-cycle conflict → MA (older) wins. x0 hardwired 0.

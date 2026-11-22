@@ -199,14 +199,25 @@ MMU (Sv32; spec 12.3, satp 12.1.11; addresses verified by tools/mmu_addr.py):
     satp write: no auto-flush (SFENCE.VMA does it). sf_all (rs1=rs2=0),
     sf_asid (rs2!=0; G entries survive asid flush, killed by sf_all).
   Page sizes: 4K / 4M only (Sv32 LEVELS=2; no 1G in Sv32).
-  Walk latency (1cyc slave): L1 read 2cyc + L0 read 2cyc + 1cyc result = 5cyc miss;
-  hit = 1 cyc. WB B4 read-only master, 1 outstanding.
+  Walk latency (1cyc slave), IMPLEMENTED (tb M1-M13): hit = 1 cyc; 4M miss = 3;
+  4K miss = 5. DONE presented the cycle the last PTE ACK lands (S_R/S_RESP
+  bubbles folded; result computed combinationally from DAT_I in W1W/W2W).
+  1-AHEAD: REQ_I may be asserted during the previous request's DONE cycle
+  (S_RESP accept) -> sustained 1 translation/cyc on hits; core IF relies on
+  this for IPC 1. Walks are 1-outstanding. SF_I never coincident with REQ_I;
+  mid-walk SF held pending, applied after the walk's fill.
+  WB B4 read-only master, 1 outstanding.
 
 I-cache: 4 KiB, direct-mapped, 1-word lines (1024 x 32b), tag PA[31:12].
   Miss: stall IF, refill from memory (m0). fence.i & mret/sret: invalidate all.
+  Throughput (tb I11): hit pulses DONE, stays IDLE -> sustained 1 hit/cyc.
 D-cache: 4 KiB, direct-mapped, 1-word lines, write-through, no-allocate on miss.
   Load: hit->data 1 cyc (MA); miss->m1 read (stall MA, flush pipeline).
   Store: hit->write-through m1 (stall MA); miss->direct m1 write.
+  Throughput (tb I11/D11): HIT path pulses DONE and stays in IDLE -> sustained
+  1 hit/cyc (back-to-back REQ on consecutive cycles, no WB). Miss/store = 3 cyc
+  and 1/cyc-capped by the 1-outstanding WB slave (inherent, not a design bubble).
+  No 1-ahead S_RESP state needed (unlike mmu, whose DONE sat in S_RESP).
   fence: pipeline flush (1 cycle). No coherence issue (single core, ROM code only
   modified via DRAM when I-cache disabled? -> code in ROM or invalid I-cache line:
   firmware places self-mod code in DRAM, uses fence.i; I-cache lines for DRAM
@@ -258,8 +269,10 @@ F. Perf: Dhrystone (embedded) cycle count -> DMIPS/MHz via TB cycle count;
 - [x] wb_ic + tb (with WB slave models)
 - [x] mmu + tb (walker + TLB, with WB ram): 59 checks M1-M12 all pass
 - [x] l1_i + tb (23 checks I1-I10) and l1_d + tb (20 checks D1-D10)
-- [ ] update mmu.v to be fully pipelined (high performance)
-- [ ] update l1_i & l1_d to be fully pipelined (high performance)
+- [x] mmu.v fully pipelined: hit 1 / 4M 3 / 4K 5 + 1-ahead (sustained 1/cyc);
+      tb +M13 (67 checks)
+- [x] l1_i & l1_d fully pipelined: verified sustained 1.0 hit/cyc (DONE pulses
+      in IDLE; no change needed); tb +I11 (28), +D11 (24)
 - [ ] core + tb (plan: notes/core.md)
   - [ ] C1 fetch+decode+R/I ALU (+LUI/AUIPC), straight-line, Bare
   - [ ] C2 M ext (MUL/DIV/REM x4 + H/HSU/HU)

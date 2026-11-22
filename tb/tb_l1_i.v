@@ -294,6 +294,28 @@ module tb_l1_i;
         else
             err("I10: stb/ack balanced");
 
+        // ---- I11 sustained hit throughput (1.0 hit/cyc): back-to-back REQ
+        // on consecutive cycles to two resident lines (distinct sets) ->
+        // DONE every cycle, no WB. (Hit path pulses DONE and stays IDLE.)
+        inval();
+        ic_req(32'h00004000);   // fill set 0, data word 0x1000
+        ic_req(32'h00004004);   // fill set 1, data word 0x1001
+        stb_tot = 0; ack_cnt = 0; stb_cnt = 0; rc = 0; // clear counters
+        @(negedge clk);
+        while (DONE) @(negedge clk);
+        REQ = 1; PA_I = 32'h00004000;   // request A
+        @(posedge clk); #1;              // -> result A
+        PA_I = 32'h00004004;             // request B (next cycle)
+        if (DONE && DATAO === 32'h00001000) ok("I11: b2b hit A"); else err("I11: b2b hit A");
+        @(posedge clk); #1;              // -> result B
+        if (DONE && DATAO === 32'h00001001) ok("I11: b2b hit B"); else err("I11: b2b hit B");
+        @(posedge clk); #1;              // -> result C (REQ held on cycle C)
+        REQ = 0;
+        if (DONE) ok("I11: b2b hit C"); else err("I11: b2b hit C");
+        if (rc === 0) ok("I11: b2b no WB"); else err("I11: b2b no WB");
+        if (stb_cnt === 0) ok("I11: b2b no stb"); else err("I11: b2b no stb");
+
+        // ---- summary
         $display("============================================");
         $display("TB L1I: %0d passes, %0d errors (cyc=%0d)",
                  passes, errors, cyc);

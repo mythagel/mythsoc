@@ -4,8 +4,8 @@
 // All constants (RAM loads, SATP words, expected PA/cause/latency) come from
 // tools/mmu_addr.py (reference walk model, spec 12.3).
 //
-// Latency (cycles from REQ cycle to DONE cycle): hit / M / Bare = 2,
-// 4M miss = 5, 4K miss = 7.  STB cycles: hit/M/Bare = 0, 4M = 1, 4K = 2.
+// Latency (cycles from REQ cycle to DONE cycle): hit / M / Bare = 1,
+// 4M miss = 3, 4K miss = 5.  STB cycles: hit/M/Bare = 0, 4M = 1, 4K = 2.
 `timescale 1ns/1ps
 module tb_mmu;
 
@@ -161,12 +161,12 @@ module tb_mmu;
         // ---- M1 reset: M-mode / Bare identity (no walk, TLB untouched)
         ram_clear();
         mmu_req(32'h00001004, 2'd0, 2'd0, S_A0, 1'b0, 1'b0);
-        if (!q_fau && q_pa === 32'h00001004 && q_lat === 9'd2 && q_stb === 9'd0)
+        if (!q_fau && q_pa === 32'h00001004 && q_lat === 9'd1 && q_stb === 9'd0)
             ok("M1: M-mode identity");
         else
             err("M1: M-mode identity");
         mmu_req(32'h00001004, 2'd1, 2'd1, 32'h0, 1'b0, 1'b0);
-        if (!q_fau && q_pa === 32'h00001004 && q_lat === 9'd2 && q_stb === 9'd0)
+        if (!q_fau && q_pa === 32'h00001004 && q_lat === 9'd1 && q_stb === 9'd0)
             ok("M1: Bare identity");
         else
             err("M1: Bare identity");
@@ -178,8 +178,8 @@ module tb_mmu;
             ok("M2: 4K miss PA");
         else
             err("M2: 4K miss PA");
-        if (q_lat === 9'd7 && q_stb === 9'd2)
-            ok("M2: 4K miss lat7 stb2");
+        if (q_lat === 9'd5 && q_stb === 9'd2)
+            ok("M2: 4K miss lat5 stb2");
         else
             err("M2: 4K miss lat/stb");
         if (rc === 2 && rlog[0] === 32'h00004000 && rlog[1] === 32'h00010004)
@@ -189,17 +189,17 @@ module tb_mmu;
 
         // ---- M3 4K hits (L1/L2): same page, other offset; store (D=1)
         mmu_req(32'h0000100C, 2'd0, 2'd1, S_A0, 1'b0, 1'b0);
-        if (!q_fau && q_pa === 32'h0000100C && q_lat === 9'd2 && q_stb === 9'd0)
-            ok("M3: 4K hit lat2");
+        if (!q_fau && q_pa === 32'h0000100C && q_lat === 9'd1 && q_stb === 9'd0)
+            ok("M3: 4K hit lat1");
         else
-            err("M3: 4K hit lat2");
+            err("M3: 4K hit lat1");
         mmu_req(32'h00001004, 2'd2, 2'd1, S_A0, 1'b0, 1'b0);
-        if (!q_fau && q_pa === 32'h00001004 && q_lat === 9'd2)
+        if (!q_fau && q_pa === 32'h00001004 && q_lat === 9'd1)
             ok("M3: 4K hit store");
         else
             err("M3: 4K hit store");
         mmu_req(32'h00001004, 2'd3, 2'd1, S_A0, 1'b0, 1'b0);
-        if (!q_fau && q_pa === 32'h00001004 && q_lat === 9'd2)
+        if (!q_fau && q_pa === 32'h00001004 && q_lat === 9'd1)
             ok("M3: 4K hit amo");
         else
             err("M3: 4K hit amo");
@@ -207,7 +207,7 @@ module tb_mmu;
         // ---- M4 2nd page (new set): VA 0x2004 -> PA 0x2004
         ram_clear();
         mmu_req(32'h00002004, 2'd0, 2'd1, S_A0, 1'b0, 1'b0);
-        if (!q_fau && q_pa === 32'h00002004 && q_lat === 9'd7)
+        if (!q_fau && q_pa === 32'h00002004 && q_lat === 9'd5)
             ok("M4: 2nd page miss");
         else
             err("M4: 2nd page miss");
@@ -216,7 +216,7 @@ module tb_mmu;
         else
             err("M4: L0 addr page2");
         mmu_req(32'h0000200C, 2'd1, 2'd1, S_A0, 1'b0, 1'b0);
-        if (!q_fau && q_pa === 32'h0000200C && q_lat === 9'd2)
+        if (!q_fau && q_pa === 32'h0000200C && q_lat === 9'd1)
             ok("M4: page2 hit");
         else
             err("M4: page2 hit");
@@ -224,22 +224,22 @@ module tb_mmu;
         // ---- M5 4M mega (map B): PA = PPN1[9:0]<<22 | VA[21:0]
         ram_clear();
         mmu_req(32'h00400004, 2'd0, 2'd1, S_B0, 1'b0, 1'b0);
-        if (!q_fau && q_pa === 32'h02000004 && q_lat === 9'd5 && q_stb === 9'd1)
-            ok("M5: 4M miss lat5 PA");
+        if (!q_fau && q_pa === 32'h02000004 && q_lat === 9'd3 && q_stb === 9'd1)
+            ok("M5: 4M miss lat3 PA");
         else
-            err("M5: 4M miss lat5 PA");
+            err("M5: 4M miss lat3 PA");
         if (rc === 1 && rlog[0] === 32'h00008004)
             ok("M5: 4M L1 addr");
         else
             err("M5: 4M L1 addr");
         mmu_req(32'h00404000, 2'd1, 2'd1, S_B0, 1'b0, 1'b0);
-        if (!q_fau && q_pa === 32'h02004000 && q_lat === 9'd2)
+        if (!q_fau && q_pa === 32'h02004000 && q_lat === 9'd1)
             ok("M5: 4M hit PA");
         else
             err("M5: 4M hit PA");
         ram_clear();
         mmu_req(32'h7FFFFFFF, 2'd0, 2'd1, S_B0, 1'b0, 1'b0);
-        if (!q_fau && q_pa === 32'h023FFFFF && q_lat === 9'd5)
+        if (!q_fau && q_pa === 32'h023FFFFF && q_lat === 9'd3)
             ok("M5: 4M new set miss");
         else
             err("M5: 4M new set miss");
@@ -248,18 +248,18 @@ module tb_mmu;
         sfence(2'b01, 9'd0, 32'h0);
         ram_set(32'h00008004, 32'h008014CF);
         mmu_req(32'h00400004, 2'd0, 2'd1, S_B0, 1'b0, 1'b0);
-        if (q_fau && q_cause === 4'd12 && q_lat === 9'd5)
+        if (q_fau && q_cause === 4'd12 && q_lat === 9'd3)
             ok("M6: 4M misalign fault");
         else
             err("M6: 4M misalign fault");
         mmu_req(32'h00400004, 2'd0, 2'd1, S_B0, 1'b0, 1'b0);
-        if (q_fau && q_cause === 4'd12 && q_lat === 9'd5)
+        if (q_fau && q_cause === 4'd12 && q_lat === 9'd3)
             ok("M6: fault not filled");
         else
             err("M6: fault not filled");
         ram_set(32'h00008004, 32'h008000C5);
         mmu_req(32'h00400004, 2'd1, 2'd1, S_B0, 1'b0, 1'b0);
-        if (q_fau && q_cause === 4'd13 && q_lat === 9'd5)
+        if (q_fau && q_cause === 4'd13 && q_lat === 9'd3)
             ok("M6: 4M R0W1 fault13");
         else
             err("M6: 4M R0W1 fault13");
@@ -269,12 +269,12 @@ module tb_mmu;
         // ---- M7 perms (map C): R/X/RW, A/D, U/SUM/MXR, amo, U-mode
         sfence(2'b01, 9'd0, 32'h0);
         mmu_req(32'h00001004, 2'd1, 2'd1, S_C0, 1'b0, 1'b0);
-        if (!q_fau && q_pa === 32'h00001004 && q_lat === 9'd7)
+        if (!q_fau && q_pa === 32'h00001004 && q_lat === 9'd5)
             ok("M7: R-only load OK");
         else
             err("M7: R-only load OK");
         mmu_req(32'h00001004, 2'd0, 2'd1, S_C0, 1'b0, 1'b0);
-        if (q_fau && q_cause === 4'd12 && q_lat === 9'd2)
+        if (q_fau && q_cause === 4'd12 && q_lat === 9'd1)
             ok("M7: R-only fetch 12");
         else
             err("M7: R-only fetch 12");
@@ -289,7 +289,7 @@ module tb_mmu;
         else
             err("M7: R-only amo 15");
         mmu_req(32'h00002004, 2'd0, 2'd1, S_C0, 1'b0, 1'b0);
-        if (!q_fau && q_pa === 32'h00001004 && q_lat === 9'd7)
+        if (!q_fau && q_pa === 32'h00001004 && q_lat === 9'd5)
             ok("M7: X-only fetch OK");
         else
             err("M7: X-only fetch OK");
@@ -314,7 +314,7 @@ module tb_mmu;
         else
             err("M7: X-only amo 15");
         mmu_req(32'h00003004, 2'd1, 2'd1, S_C0, 1'b0, 1'b0);
-        if (!q_fau && q_pa === 32'h00001004 && q_lat === 9'd7)
+        if (!q_fau && q_pa === 32'h00001004 && q_lat === 9'd5)
             ok("M7: RW load OK");
         else
             err("M7: RW load OK");
@@ -324,12 +324,12 @@ module tb_mmu;
         else
             err("M7: D=0 store 15");
         mmu_req(32'h00004004, 2'd1, 2'd1, S_C0, 1'b0, 1'b0);
-        if (q_fau && q_cause === 4'd13 && q_lat === 9'd7)
+        if (q_fau && q_cause === 4'd13 && q_lat === 9'd5)
             ok("M7: R0W1 fault13");
         else
             err("M7: R0W1 fault13");
         mmu_req(32'h00005004, 2'd1, 2'd1, S_C0, 1'b0, 1'b0);
-        if (q_fau && q_cause === 4'd13 && q_lat === 9'd7)
+        if (q_fau && q_cause === 4'd13 && q_lat === 9'd5)
             ok("M7: S U=1 load 13");
         else
             err("M7: S U=1 load 13");
@@ -359,110 +359,110 @@ module tb_mmu;
         else
             err("M7: U fetch U=1 OK");
         mmu_req(32'h00008004, 2'd1, 2'd2, S_C0, 1'b0, 1'b0);
-        if (q_fau && q_cause === 4'd13 && q_lat === 9'd7)
+        if (q_fau && q_cause === 4'd13 && q_lat === 9'd5)
             ok("M7: U load U=0 13");
         else
             err("M7: U load U=0 13");
         mmu_req(32'h00006004, 2'd1, 2'd1, S_C0, 1'b0, 1'b0);
-        if (q_fau && q_cause === 4'd13 && q_lat === 9'd7)
+        if (q_fau && q_cause === 4'd13 && q_lat === 9'd5)
             ok("M7: A=0 fault13");
         else
             err("M7: A=0 fault13");
         mmu_req(32'h00009004, 2'd1, 2'd1, S_C0, 1'b0, 1'b0);
-        if (q_fau && q_cause === 4'd13 && q_lat === 9'd7)
+        if (q_fau && q_cause === 4'd13 && q_lat === 9'd5)
             ok("M7: v=0 unmapped 13");
         else
             err("M7: v=0 unmapped 13");
         mmu_req(32'h00007004, 2'd1, 2'd1, S_C0, 1'b0, 1'b0);
-        if (!q_fau && q_pa === 32'h00001004 && q_lat === 9'd7)
+        if (!q_fau && q_pa === 32'h00001004 && q_lat === 9'd5)
             ok("M7: G page load OK");
         else
             err("M7: G page load OK");
         // L2 entry from "U load U=0 13" (same VA/asid, set8 tag VA[31:17])
-        // survives the L1 eviction by the G-page fill -> L2 hit, lat2.
+        // survives the L1 eviction by the G-page fill -> L2 hit, lat1.
         mmu_req(32'h00008004, 2'd1, 2'd1, S_C0, 1'b0, 1'b0);
-        if (!q_fau && q_pa === 32'h00001004 && q_lat === 9'd2)
+        if (!q_fau && q_pa === 32'h00001004 && q_lat === 9'd1)
             ok("M7: S load U=0 OK");
         else
             err("M7: S load U=0 OK");
 
         // ---- M8 ASID tagging: mismatch -> miss even on same VA
         mmu_req(32'h00001004, 2'd0, 2'd1, S_A1, 1'b0, 1'b0);
-        if (!q_fau && q_pa === 32'h00001004 && q_lat === 9'd7)
+        if (!q_fau && q_pa === 32'h00001004 && q_lat === 9'd5)
             ok("M8: asid1 miss refill");
         else
             err("M8: asid1 miss refill");
         mmu_req(32'h00001004, 2'd0, 2'd1, S_A0, 1'b0, 1'b0);
-        if (!q_fau && q_pa === 32'h00001004 && q_lat === 9'd7)
+        if (!q_fau && q_pa === 32'h00001004 && q_lat === 9'd5)
             ok("M8: asid0 miss again");
         else
             err("M8: asid0 miss again");
         mmu_req(32'h0000100C, 2'd0, 2'd1, S_A0, 1'b0, 1'b0);
-        if (!q_fau && q_pa === 32'h0000100C && q_lat === 9'd2)
+        if (!q_fau && q_pa === 32'h0000100C && q_lat === 9'd1)
             ok("M8: asid0 hit");
         else
             err("M8: asid0 hit");
 
         // ---- M9 sfence all: hit -> flush -> miss
         mmu_req(32'h00001004, 2'd0, 2'd1, S_A0, 1'b0, 1'b0);
-        if (!q_fau && q_lat === 9'd2)
+        if (!q_fau && q_lat === 9'd1)
             ok("M9: hit before flush");
         else
             err("M9: hit before flush");
         sfence(2'b01, 9'd0, 32'h0);
         mmu_req(32'h00001004, 2'd0, 2'd1, S_A0, 1'b0, 1'b0);
-        if (!q_fau && q_lat === 9'd7)
+        if (!q_fau && q_lat === 9'd5)
             ok("M9: miss after all");
         else
             err("M9: miss after all");
 
         // ---- M10 sfence asid: G entries survive, others flushed
         mmu_req(32'h00007004, 2'd1, 2'd1, S_C1, 1'b0, 1'b0);
-        if (!q_fau && q_pa === 32'h00001004 && q_lat === 9'd7)
+        if (!q_fau && q_pa === 32'h00001004 && q_lat === 9'd5)
             ok("M10: C asid1 G fill");
         else
             err("M10: C asid1 G fill");
         mmu_req(32'h00008004, 2'd1, 2'd1, S_C1, 1'b0, 1'b0);
-        if (!q_fau && q_pa === 32'h00001004 && q_lat === 9'd7)
+        if (!q_fau && q_pa === 32'h00001004 && q_lat === 9'd5)
             ok("M10: C asid1 NG fill");
         else
             err("M10: C asid1 NG fill");
         sfence(2'b10, 9'd1, 32'h0);
         mmu_req(32'h00007004, 2'd1, 2'd1, S_C1, 1'b0, 1'b0);
-        if (!q_fau && q_lat === 9'd2)
+        if (!q_fau && q_lat === 9'd1)
             ok("M10: G survives asid");
         else
             err("M10: G survives asid");
         mmu_req(32'h00008004, 2'd1, 2'd1, S_C1, 1'b0, 1'b0);
-        if (!q_fau && q_lat === 9'd7)
+        if (!q_fau && q_lat === 9'd5)
             ok("M10: NG flushed asid");
         else
             err("M10: NG flushed asid");
 
         // ---- M11 sfence page: one 4K page flushed, others kept
         mmu_req(32'h00001004, 2'd0, 2'd1, S_A0, 1'b0, 1'b0);
-        if (!q_fau && q_lat === 9'd2)
+        if (!q_fau && q_lat === 9'd1)
             ok("M11: page1 hit");
         else
             err("M11: page1 hit");
         mmu_req(32'h00002004, 2'd0, 2'd1, S_A0, 1'b0, 1'b0);
-        if (!q_fau && q_lat === 9'd7)
+        if (!q_fau && q_lat === 9'd5)
             ok("M11: page2 refill");
         else
             err("M11: page2 refill");
         mmu_req(32'h00002004, 2'd0, 2'd1, S_A0, 1'b0, 1'b0);
-        if (!q_fau && q_lat === 9'd2)
+        if (!q_fau && q_lat === 9'd1)
             ok("M11: page2 hit");
         else
             err("M11: page2 hit");
         sfence(2'b11, 9'd0, 32'h00002004);
         mmu_req(32'h00001004, 2'd0, 2'd1, S_A0, 1'b0, 1'b0);
-        if (!q_fau && q_lat === 9'd2)
+        if (!q_fau && q_lat === 9'd1)
             ok("M11: page1 kept");
         else
             err("M11: page1 kept");
         mmu_req(32'h00002004, 2'd0, 2'd1, S_A0, 1'b0, 1'b0);
-        if (!q_fau && q_lat === 9'd7)
+        if (!q_fau && q_lat === 9'd5)
             ok("M11: page2 flushed");
         else
             err("M11: page2 flushed");
@@ -486,20 +486,76 @@ module tb_mmu;
             err("M12: mid-walk done");
         else
             ok("M12: mid-walk done");
-        if (cyc - lat0 !== 9'd7)
-            err("M12: mid-walk lat7");
+        if (cyc - lat0 !== 9'd5)
+            err("M12: mid-walk lat5");
         else
-            ok("M12: mid-walk lat7");
+            ok("M12: mid-walk lat5");
         mmu_req(32'h00001004, 2'd0, 2'd1, S_A0, 1'b0, 1'b0);
-        if (!q_fau && q_lat === 9'd7)
+        if (!q_fau && q_lat === 9'd5)
             ok("M12: flush after fill");
         else
             err("M12: flush after fill");
         mmu_req(32'h00001004, 2'd0, 2'd1, S_A0, 1'b0, 1'b0);
-        if (!q_fau && q_lat === 9'd2)
+        if (!q_fau && q_lat === 9'd1)
             ok("M12: refill hit");
         else
             err("M12: refill hit");
+
+        // ---- M13 1-ahead sustained throughput (REQ during DONE cycle)
+        sfence(2'b01, 9'd0, 32'h0);
+        ram_clear();
+        mmu_req(32'h00001004, 2'd0, 2'd1, S_A0, 1'b0, 1'b0);
+        if (!q_fau && q_pa === 32'h00001004 && q_lat === 9'd5)
+            ok("M13: warm miss lat5");
+        else
+            err("M13: warm miss lat5");
+        // burst: REQ stays high; new VA presented every cycle (during DONE).
+        ram_clear();   // count only burst+1-ahead-miss reads
+        @(negedge clk);
+        while (DONE) @(negedge clk);
+        REQ = 1; VA_I = 32'h00001004; ACC_I = 2'd0; MODE_I = 2'd1;
+        SATP_I = S_A0; SUM = 0; MXR = 0;
+        @(negedge clk);
+        if (DONE && !FAU && PAO === 32'h00001004)
+            ok("M13: burst r0 lat1");
+        else
+            err("M13: burst r0 lat1");
+        VA_I = 32'h00001008;
+        @(negedge clk);
+        if (DONE && !FAU && PAO === 32'h00001008)
+            ok("M13: burst r1 lat1");
+        else
+            err("M13: burst r1 lat1");
+        VA_I = 32'h00001018;
+        @(negedge clk);
+        if (DONE && !FAU && PAO === 32'h00001018)
+            ok("M13: burst r2 lat1");
+        else
+            err("M13: burst r2 lat1");
+        if (rc === 0)
+            ok("M13: burst no walk");
+        else
+            err("M13: burst no walk");
+        // miss issued 1-ahead (during last hit's DONE cycle): walk starts
+        // immediately; DONE at +4 posedges after issue edge (latency 5).
+        VA_I = 32'h00002004;
+        @(posedge clk); #1;
+        REQ = 0;
+        nd = 0;
+        while (!DONE) begin @(posedge clk); #1; nd = nd + 1; end
+        if (DONE && !FAU && PAO === 32'h00002004 && nd === 4)
+            ok("M13: 1-ahead miss lat5");
+        else
+            err("M13: 1-ahead miss lat5");
+        if (rc === 2 && rlog[0] === 32'h00004000 && rlog[1] === 32'h00010008)
+            ok("M13: 1-ahead miss reads");
+        else
+            err("M13: 1-ahead miss reads");
+        mmu_req(32'h00001004, 2'd0, 2'd1, S_A0, 1'b0, 1'b0);
+        if (!q_fau && q_lat === 9'd1)
+            ok("M13: burst entries hit");
+        else
+            err("M13: burst entries hit");
 
         // ---- summary
         $display("============================================");
