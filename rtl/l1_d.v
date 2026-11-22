@@ -12,7 +12,8 @@
 //   REQ_I is a 1-cycle pulse, asserted while idle (DONE_O low) OR
 //   during the previous transfer's DONE cycle (hit or miss; DATA_O is
 //   a held register, sampled the DONE cycle).
-//   WEN_I: 0=load, 1=store; WDAT_I valid on REQ for stores.
+//   WEN_I: 0=load, 1=store; WDAT_I/SEL_I valid on REQ for stores
+//   (SEL_I byte lanes pass to the WB write; loads/fills stay 4'b1111).
 //   load hit  : DONE_O 1 cycle after REQ (latency 1); DATA_O valid.
 //   load miss : WB read, line filled, DONE 1 cycle after memory ACK
 //               (1-cyc slave: latency 3 from REQ).
@@ -25,6 +26,7 @@
 module l1_d (
     input clk, rst,
     input        REQ_I,
+    input [3:0]  SEL_I,
     input [31:0] PA_I,
     input        WEN_I,
     input [31:0] WDAT_I,
@@ -48,24 +50,26 @@ module l1_d (
     reg [31:0] mem [0:1023];
 
     reg [31:0] adr_r, wd_r;
+    reg [3:0]  sel_r;
     reg        wen_r;
 
     wire [9:0]  idx = PA_I[11:2];
     wire       hit = v[idx] && (tag[idx] == PA_I[31:12]);
 
     assign STB_O = (st == W_W1S);
-    assign SEL_O = 4'b1111;
+    assign SEL_O = (st == W_W1S) && wen_r ? sel_r : 4'b1111;
     assign WE_O  = (st == W_W1S) && wen_r;
     assign ADR_O = adr_r;
     assign WDAT_O = wd_r;
 
-    integer i;
+    integer i, j;
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             st <= W_IDLE;
             DONE_O <= 1'b0;
             adr_r <= 32'h0;
             wd_r <= 32'h0;
+            sel_r <= 4'h0;
             wen_r <= 1'b0;
             for (i = 0; i < 1024; i = i + 1)
                 v[i] <= 1'b0;
@@ -77,10 +81,14 @@ module l1_d (
                     adr_r <= PA_I;
                     wen_r <= WEN_I;
                     wd_r  <= WDAT_I;
+                    sel_r <= SEL_I;
                     if (WEN_I) begin
-                        // store: update line if present (hit), then WB write
-                        if (hit)
-                            mem[idx] <= WDAT_I;
+                        // store: byte-merge line if present (hit), WB write
+                        if (hit) begin
+                            for (j = 0; j < 4; j = j + 1)
+                                if (SEL_I[j])
+                                    mem[idx][j*8 +: 8] <= WDAT_I[j*8 +: 8];
+                        end
                         st <= W_W1S;
                     end else if (hit) begin
                         // load hit: serve from line

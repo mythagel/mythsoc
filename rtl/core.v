@@ -66,7 +66,10 @@ module core (
     // stall: freeze ID/EX/MA/WB + IF/ID (C8: load-use). flush: kill IF/ID and
     // in-flight fetch (C3 branches/traps). redirect: load fpc (C3).
     wire        div_stall;                 // iterative divide (C2)
-    wire        stall = div_stall;
+    // C4: EX holds a mem op until mmu_d PA is in hand; MA holds until the
+    // l1_d DONE (load data / store ack). Younger stages freeze with it.
+    wire        pa_wait, ma_wait;
+    wire        stall = div_stall | pa_wait | ma_wait;
     // C3: control transfers resolve in MA (no prediction). redirect loads
     // fpc; flush kills IF/ID + ID/EX + in-flight fetch (discard flags).
     wire        exma_jbr, exma_taken;
@@ -164,7 +167,12 @@ module core (
         .ACK_I(m2_ack), .DAT_I(m2_dat)
     );
 
-    // D-side MMU: idle until C4 (REQ held low).
+    // C4 nets (defined in the MA section; declared early for instances)
+    wire        req_md, req_ld;
+    wire [31:0] ex_addr, load_rdata, store_wd, md_pa;
+    wire [3:0]  store_sel;
+
+    // D-side MMU: load/store translation (M-mode Bare = identity).
     wire       mmd_done, mmd_fault;
     wire [31:0] mmd_pa;
     wire [3:0]  mmd_cause;
@@ -173,8 +181,8 @@ module core (
     wire [31:0] mmd_adr;
     mmu mmu_d (
         .clk(clk), .rst(rst),
-        .REQ_I(1'b0), .VA_I(32'h0),
-        .ACC_I(2'b01), .MODE_I(2'b00),
+        .REQ_I(req_md), .VA_I(ex_addr),
+        .ACC_I(idex_st ? 2'b10 : 2'b01), .MODE_I(2'b00),
         .SUM_I(1'b0), .MXR_I(1'b0), .SATP_I(32'h0),
         .DONE_O(mmd_done), .PA_O(mmd_pa),
         .FAULT_O(mmd_fault), .CAUSE_O(mmd_cause),
@@ -204,7 +212,8 @@ module core (
     wire [31:0] mld_data;
     l1_d l1d (
         .clk(clk), .rst(rst),
-        .REQ_I(1'b0), .PA_I(32'h0), .WEN_I(1'b0), .WDAT_I(32'h0),
+        .REQ_I(req_ld), .SEL_I(store_sel), .PA_I(exma_pa),
+        .WEN_I(exma_st), .WDAT_I(store_wd),
         .DONE_O(mld_done), .DATA_O(mld_data),
         .STB_O(m1_stb), .SEL_O(m1_sel), .ADR_O(m1_adr), .WE_O(m1_we),
         .WDAT_O(m1_wdat), .ACK_I(m1_ack), .DAT_I(m1_dat)
@@ -231,19 +240,33 @@ module core (
     reg  [4:0]  idex_alu;
     reg         idex_jbr, idex_jump, idex_ind;
     reg  [2:0]  idex_bsel3;
+    reg         idex_mem, idex_st;
+    reg  [2:0]  idex_wd3;
+    reg  [31:0] idex_d;
     reg  [31:0] idex_pc, idex_a, idex_b, idex_off, idex_c;
     reg         exma_v, exma_wr;
     reg  [4:0]  exma_rd;
     reg  [31:0] exma_res, exma_pc;
     reg         exma_jbr_q, exma_taken_q;
     reg  [31:0] exma_target_q;
+    reg         exma_mem_q, exma_st_q;
+    reg  [2:0]  exma_wd3_q;
+    reg  [31:0] exma_pa_q, exma_d_q;
     reg         mawb_v, mawb_wr;
     reg  [4:0]  mawb_rd;
     reg  [31:0] mawb_res, mawb_pc;
 
+    wire        exma_mem, exma_st;
+    wire [2:0]  exma_wd3;
+    wire [31:0] exma_pa, exma_d;
     assign exma_jbr   = exma_jbr_q;
     assign exma_taken = exma_taken_q;
     assign exma_target = exma_target_q;
+    assign exma_mem   = exma_mem_q;
+    assign exma_st    = exma_st_q;
+    assign exma_wd3   = exma_wd3_q;
+    assign exma_pa    = exma_pa_q;
+    assign exma_d     = exma_d_q;
 
     // ------------------------------------------------------------ ID decode
     wire [6:0] op   = ifid_instr[6:0];
@@ -255,6 +278,7 @@ module core (
 
     wire [31:0] imm_i = {{20{ifid_instr[31]}}, ifid_instr[31:20]};
     wire [31:0] imm_u = {ifid_instr[31:12], 12'h0};
+    wire [31:0] imm_s = {{20{ifid_instr[31]}}, ifid_instr[31:25], ifid_instr[11:7]};
     wire [31:0] imm_b = {{19{ifid_instr[31]}}, ifid_instr[31], ifid_instr[7],
                          ifid_instr[30:25], ifid_instr[11:8], 1'b0};
     wire [31:0] imm_j = {{11{ifid_instr[31]}}, ifid_instr[31], ifid_instr[19:12],
@@ -264,10 +288,13 @@ module core (
     wire is_opimm = (op == 7'h13);
     wire is_lui   = (op == 7'h37);
     wire is_auipc = (op == 7'h17);
+    wire is_load  = (op == 7'h03);
+    wire is_store = (op == 7'h23);
     wire is_br    = (op == 7'h63);
     wire is_jal   = (op == 7'h6F);
     wire is_jalr  = (op == 7'h67);
-    wire legal    = is_op | is_opimm | is_lui | is_auipc | is_br | is_jal | is_jalr; // C5 traps illegal
+    wire legal    = is_op | is_opimm | is_lui | is_auipc | is_br | is_jal | is_jalr
+                  | is_load | is_store;  // C5 traps illegal
 
     reg        c_wr;
     reg  [1:0] c_asrc;
@@ -277,12 +304,21 @@ module core (
     reg  [31:0] d_imm;
     reg        c_jbr, c_jump, c_ind;
     reg  [2:0] c_bsel3;
+    reg        c_mem, c_st;
+    reg  [2:0] c_wd3;
 
     always @(*) begin
         c_wr = 1'b0;  c_asrc = SRC_RS1; c_bsel = 2'd0; c_alu = ALU_PASS;
         d_rs1  = 5'h0;  d_rs2  = 5'h0;    d_imm = imm_i;
         c_jbr = 1'b0;   c_jump = 1'b0;    c_ind = 1'b0; c_bsel3 = 3'h0;
-        if (is_br) begin
+        c_mem = 1'b0;   c_st = 1'b0;      c_wd3 = 3'h0;
+        if (is_load) begin
+            c_wr = 1'b1; c_mem = 1'b1; c_asrc = SRC_RS1; c_bsel = 2'd1;
+            d_imm = imm_i; c_wd3 = f3; d_rs1 = rs1;
+        end else if (is_store) begin
+            c_mem = 1'b1; c_st = 1'b1; c_asrc = SRC_RS1; c_bsel = 2'd1;
+            d_imm = imm_s; c_wd3 = f3; d_rs1 = rs1; d_rs2 = rs2;
+        end else if (is_br) begin
             c_jbr = 1'b1; c_asrc = SRC_RS1; c_bsel = 2'd0; d_imm = imm_b;
             c_bsel3 = f3;
         end else if (is_jal) begin
@@ -361,6 +397,7 @@ module core (
         if (rst) begin
             idex_v <= 1'b0; idex_wr <= 1'b0; idex_rd <= 5'h0; idex_alu <= 5'h0;
             idex_jbr <= 1'b0; idex_jump <= 1'b0; idex_ind <= 1'b0; idex_bsel3 <= 3'h0;
+            idex_mem <= 1'b0; idex_st <= 1'b0; idex_wd3 <= 3'h0; idex_d <= 32'h0;
             idex_pc <= 32'h0; idex_a <= 32'h0; idex_b <= 32'h0;
             idex_off <= 32'h0; idex_c <= 32'h0;
         end else if (flush) begin
@@ -374,6 +411,10 @@ module core (
             idex_jump <= c_jump;
             idex_ind  <= c_ind;
             idex_bsel3<= c_bsel3;
+            idex_mem  <= ifid_v && c_mem;
+            idex_st   <= c_st;
+            idex_wd3  <= c_wd3;
+            idex_d    <= fwd_b;
             idex_pc   <= ifid_pc;
             idex_off  <= d_imm;
             idex_c    <= fwd_a;
@@ -391,11 +432,19 @@ module core (
     // latch only ever happens on a !stall edge, i.e. the divider's D_DONE
     // cycle for div), exma (d=2), mawb (d=3), or retired to rf (d>=4).
     // Youngest matching writer wins; x0 never forwards.
+    // load-data forward: exma load on its l1_d DONE cycle (ma_wait keeps
+    // younger stages parked until exactly this cycle).
+    wire lf_a = (exma_v && exma_mem && !exma_st && mld_done &&
+                 (exma_rd != 5'h0) && (exma_rd == rs1));
+    wire lf_b = (exma_v && exma_mem && !exma_st && mld_done &&
+                 (exma_rd != 5'h0) && (exma_rd == rs2));
     wire [31:0] fwd_a =
+        lf_a ? load_rdata :
         (idex_v && idex_wr && (idex_rd == rs1) && (rs1 != 5'h0)) ? alu_res :
         (exma_wr && (exma_rd != 5'h0) && (exma_rd == rs1))       ? exma_res :
         (mawb_wr && (mawb_rd != 5'h0) && (mawb_rd == rs1))       ? mawb_res : rf_r1;
     wire [31:0] fwd_b =
+        lf_b ? load_rdata :
         (idex_v && idex_wr && (idex_rd == rs2) && (rs2 != 5'h0)) ? alu_res :
         (exma_wr && (exma_rd != 5'h0) && (exma_rd == rs2))       ? exma_res :
         (mawb_wr && (mawb_rd != 5'h0) && (mawb_rd == rs2))       ? mawb_res : rf_r2;
@@ -477,6 +526,67 @@ module core (
         end
     end
 
+    // ---------------------------------------------- C4: D-side translation
+    // mmu_d REQ issues while the mem op is in EX (PA ready by MA entry;
+    // pa_wait extends EX if not). md_pv holds a PA whose cache slot waits.
+    wire [31:0] ex_addr_c = idex_a + idex_b;   // rs1 + offset (both forwarded)
+    assign ex_addr = ex_addr_c;
+
+    reg  md_mio, md_pv, d_md;
+    reg  [31:0] md_pa_r;
+    assign md_pa = md_pa_r;
+
+    wire fresh_md = mmd_done && !d_md && !flush;
+    wire pa_now_c = md_pv || fresh_md;
+    assign pa_wait = idex_v && idex_mem && !pa_now_c;
+    assign req_md  = idex_v && idex_mem && !md_mio && !md_pv && !d_md;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            md_mio <= 1'b0; md_pv <= 1'b0; d_md <= 1'b0; md_pa_r <= 32'h0;
+        end else begin
+            md_mio <= flush ? 1'b0 : (req_md ? 1'b1 : (mmd_done ? 1'b0 : md_mio));
+            md_pv  <= flush   ? 1'b0 :
+                      fresh_md ? stall     // held only if op can't advance now
+                      : (md_pv && !stall) ? 1'b0   // consumed by advance
+                      : md_pv;
+            d_md   <= (d_md || (flush && md_mio)) && !mmd_done;
+            if (fresh_md) md_pa_r <= mmd_pa;
+        end
+    end
+
+    // ------------------------------------------------------ C4: MA memory
+    reg  ld_mio;
+    assign req_ld = exma_v && exma_mem && !ld_mio;   // idle cycle only
+    wire mem_wait_c = exma_v && exma_mem && !mld_done;
+    assign ma_wait = mem_wait_c;
+
+    always @(posedge clk or posedge rst)
+        if (rst) ld_mio <= 1'b0;
+        else     ld_mio <= req_ld ? 1'b1 : (mld_done ? 1'b0 : ld_mio);
+
+    // load extract (unpriv 2.6: width by funct3, lane by addr[1:0])
+    wire [7:0]  ld_b = exma_pa[1] ? (exma_pa[0] ? mld_data[31:24] : mld_data[23:16])
+                                  : (exma_pa[0] ? mld_data[15:8]  : mld_data[7:0]);
+    wire [15:0] ld_h = exma_pa[1] ? mld_data[31:16] : mld_data[15:0];
+    wire [31:0] load_rdata_c =
+        (exma_wd3 == 3'b000) ? {{24{ld_b[7]}},  ld_b} :   // LB
+        (exma_wd3 == 3'b001) ? {{16{ld_h[15]}}, ld_h} :   // LH
+        (exma_wd3 == 3'b100) ? {24'h0, ld_b} :            // LBU
+        (exma_wd3 == 3'b101) ? {16'h0, ld_h} :            // LHU
+                               mld_data;                  // LW
+    assign load_rdata = load_rdata_c;
+
+    // store lane merge (l1_d passes SEL through to the WB write)
+    wire [31:0] store_wd_c =
+        (exma_wd3 == 3'b000) ? {4{exma_d[7:0]}} :
+        (exma_wd3 == 3'b001) ? {2{exma_d[15:0]}} : exma_d;
+    wire [3:0] store_sel_c =
+        (exma_wd3 == 3'b000) ? (4'b0001 << exma_pa[1:0]) :
+        (exma_wd3 == 3'b001) ? (exma_pa[1] ? 4'b1100 : 4'b0011) : 4'b1111;
+    assign store_wd  = store_wd_c;
+    assign store_sel = store_sel_c;
+
     wire [31:0] alu_res;
     assign alu_res =
         (idex_alu == ALU_ADD)     ? (idex_a + idex_b) :
@@ -516,8 +626,11 @@ module core (
         if (rst) begin
             exma_v <= 1'b0; exma_wr <= 1'b0; exma_rd <= 5'h0; exma_res <= 32'h0; exma_pc <= 32'h0;
             exma_jbr_q <= 1'b0; exma_taken_q <= 1'b0; exma_target_q <= 32'h0;
+            exma_mem_q <= 1'b0; exma_st_q <= 1'b0; exma_wd3_q <= 3'h0;
+            exma_pa_q <= 32'h0; exma_d_q <= 32'h0;
         end else if (flush) begin
             exma_v <= 1'b0; exma_wr <= 1'b0; exma_jbr_q <= 1'b0;
+            exma_mem_q <= 1'b0;
         end else if (!stall) begin
             exma_v    <= idex_v;
             exma_wr   <= idex_wr;
@@ -527,6 +640,11 @@ module core (
             exma_jbr_q   <= idex_jbr;
             exma_taken_q <= ex_taken;
             exma_target_q <= ex_target;
+            exma_mem_q   <= idex_mem;
+            exma_st_q    <= idex_st;
+            exma_wd3_q   <= idex_wd3;
+            exma_pa_q    <= mmd_done ? mmd_pa : md_pa;
+            exma_d_q     <= idex_d;
         end
     end
 
@@ -538,7 +656,7 @@ module core (
             mawb_v    <= exma_v;
             mawb_wr   <= exma_wr;
             mawb_rd   <= exma_rd;
-            mawb_res  <= exma_res;
+            mawb_res  <= (exma_mem && !exma_st) ? load_rdata : exma_res;
             mawb_pc   <= exma_pc;
         end
     end

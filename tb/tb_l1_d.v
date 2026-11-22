@@ -21,7 +21,7 @@ module tb_l1_d;
 
     l1_d dut (
         .clk(clk), .rst(rst),
-        .REQ_I(REQ), .PA_I(PA_I), .WEN_I(WEN), .WDAT_I(WDI),
+        .REQ_I(REQ), .SEL_I(4'b1111), .PA_I(PA_I), .WEN_I(WEN), .WDAT_I(WDI),
         .DONE_O(DONE), .DATA_O(DATAO),
         .STB_O(STB), .SEL_O(SEL), .ADR_O(ADRW), .WE_O(WE),
         .WDAT_O(WDATO),

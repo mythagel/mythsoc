@@ -96,8 +96,26 @@ _start:
 6:  bltu  x17, x16, 7f          # 42<0 false: not taken
     bgeu  x17, x16, 8f          # 42>=0 true: taken
 7:  addi  x21, x0, 111          # must NOT execute
-8:  blt   x16, x17, 9f          # 0<42 taken
+8:  blt   x16, x17, 85f         # 0<42 taken
     addi  x21, x0, 222          # must NOT execute
+85: # ---- C4: load/store via l1_d (widths, lanes, store->load, b2b use) ----
+    lui   x22, 0x80000          # DRAM base 0x8000_0000 (Bare = identity)
+    lui   x24, 0x11223
+    addi  x24, x24, 0x344       # data 0x11223344
+    sw    x24, 0(x22)
+    sw    x24, 16(x22)          # second line
+    lw    x23, 0(x22)           # round-trip
+    add   x23, x23, x23         # immediately dependent: load forward
+    lb    x24, 3(x22)           # byte3 0x11 -> sign-extended
+    lbu   x25, 0(x22)           # byte0 0x44
+    lh    x28, 2(x22)           # half1 0x1122 -> sign-extended (pos)
+    lhu   x29, 2(x22)
+    addi  x30, x0, 0xAA
+    sb    x30, 1(x22)           # word0 -> 0x1122AA44
+    addi  x30, x0, 0x2A5
+    sh    x30, 2(x22)           # half1 -> 0x02A5: word0 -> 0x02A5AA44
+    lw    x31, 0(x22)           # merged result after sw+sb+sh
+    lb    x29, 1(x22)           # 0xAA byte sign-extended (post-store)
 9:  jal   x20, 11f
 10: addi  x21, x20, 0           # x21 = link (validates jalr path ran)
     j     12f

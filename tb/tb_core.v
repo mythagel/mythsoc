@@ -48,7 +48,7 @@ module tb_core;
     // 1-cyc-ACK RAM slaves (WB B4: ACK >= 1 cycle after STB, 1 cycle long)
     reg ack0 = 0, ack1 = 0, ack2 = 0;
     reg [31:0] dat0 = 0, dat1 = 0, dat2 = 0;
-    integer m1_stb_cnt = 0, m2_stb_cnt = 0, sel_bad = 0, we_bad = 0;
+    integer m1_stb_cnt = 0, m2_stb_cnt = 0, sel_bad = 0, we_bad = 0, m1_we_cnt = 0;
     always @(posedge clk) begin
         if (m0_stb) begin
             if (m0_sel !== 4'b1111) sel_bad = sel_bad + 1;
@@ -58,6 +58,12 @@ module tb_core;
         end else ack0 <= 1'b0;
         if (m1_stb) begin
             m1_stb_cnt = m1_stb_cnt + 1;
+            if (m1_we) begin
+                m1_we_cnt = m1_we_cnt + 1;
+                for (j2 = 0; j2 < 4; j2 = j2 + 1)
+                    if (m1_sel[j2])
+                        dram[m1_adr[13:2]][j2*8 +: 8] <= m1_wdat[j2*8 +: 8];
+            end
             ack1 <= 1'b1;
             dat1 <= dram[m1_adr[13:2]];
         end else ack1 <= 1'b0;
@@ -73,7 +79,9 @@ module tb_core;
 
     // ---------------- program + expectations ----------------
     integer exp [0:31];
+    integer mexp [0:15];                  // DRAM word goldens (C4)
 
+    integer j2 = 0;
     integer nc = 0;                       // retired instructions
     always @(posedge clk) if (dut.commit) nc = nc + 1;
     integer fq_ovf = 0;                   // fetch FIFO overflow guard (bug if set)
@@ -81,6 +89,7 @@ module tb_core;
 
     integer i, bad, t;
     initial begin
+        for (i = 0; i < 16; i = i + 1) mexp[i] = 32'h0;
         `include "tb/tb_core_exp.vh"
         for (i = 0; i < 4096; i = i + 1) begin
             irom[i] = 32'h00000013;      // ADDI x0,x0,0 (nop) past program
@@ -104,8 +113,10 @@ module tb_core;
         else ok("C1-m0-sel-ok");
         if (we_bad) err("C1 m0 we tied 0");
         else ok("C1-m0-we-ok");
-        if (m1_stb_cnt) err("C1 m1 idle");
-        else ok("C1-m1-idle");
+        if (m1_stb_cnt == 0) err("C4 m1 no traffic");
+        else ok("C4-m1-traffic");
+        if (m1_we_cnt == 0) err("C4 m1 no stores");
+        else ok("C4-m1-stores");
         if (m2_stb_cnt) err("C1 m2 idle (Bare)");
         else ok("C1-m2-idle-bare");
         if (fq_ovf) err("fetch fifo overflow");
@@ -141,6 +152,22 @@ module tb_core;
         if (dut.rf[18] !== exp[18]) err("C3-jal-sub");       else ok("C3-jal-sub");
         if (dut.rf[19] !== exp[19]) err("C3-jalr-ret");      else ok("C3-jalr-ret");
         if (dut.rf[21] !== exp[21]) err("C3-branch-skip");   else ok("C3-branch-skip");
+        // C4 named checks: load/store widths, lanes, store->load, forward
+        if (dut.rf[23] !== exp[23]) err("C4-lw-b2b-add");   else ok("C4-lw-b2b-add");
+        if (dut.rf[24] !== exp[24]) err("C4-lb-sign");      else ok("C4-lb-sign");
+        if (dut.rf[25] !== exp[25]) err("C4-lbu");          else ok("C4-lbu");
+        if (dut.rf[28] !== exp[28]) err("C4-lh-sign");      else ok("C4-lh-sign");
+        if (dut.rf[29] !== exp[29]) err("C4-lb-poststore"); else ok("C4-lb-poststore");
+        if (dut.rf[30] !== exp[30]) err("C4-sh-val");       else ok("C4-sh-val");
+        if (dut.rf[31] !== exp[31]) err("C4-sw-sb-sh-merge");else ok("C4-sw-sb-sh-merge");
+        bad = 0;
+        for (i = 0; i < 16; i = i + 1)
+            if (dram[i] !== mexp[i]) begin
+                bad = bad + 1;
+                $display("  mem[%0d] got %h exp %h", i, dram[i], mexp[i]);
+            end
+        if (bad) err("C4 dram golden");
+        else ok("C4-dram-golden16");
         if (dut.rf[0] !== 32'h0) err("C1 x0 nonzero");
         else ok("C1-x0-immovable");
 
