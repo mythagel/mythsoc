@@ -562,7 +562,12 @@ module core (
     // C8: d=1 load-use — consumer (ID: rs1/rs2) reads the rd of a load in
     // EX (idex). Hold consumer in ID (stall_if) + bubble idex; the load
     // advances to MA and ma_wait+lf_a then deliver load_rdata on re-latch.
-    wire lu_ld_ex = idex_v && idex_mem && !idex_st && (idex_rd != 5'h0) &&
+    // CSR-use (t02 debug): a CSR-op in EX (idex) with rd!=0 has the SAME
+    // d=1/d=2 hole — its result rides csr_rdata in MA -> mawb_res, never
+    // alu_res/exma_res. Hold the consumer one cycle and forward csr_rdata
+    // from exma (d=2), exactly like loads.
+    wire lu_ld_ex = ((idex_v && idex_mem && !idex_st && (idex_rd != 5'h0)) ||
+                     (idex_v && idex_csr && idex_wr && (idex_rd != 5'h0))) &&
                    ((rs1 == idex_rd && rs1 != 5'h0) ||
                     (rs2 == idex_rd && rs2 != 5'h0));
     assign lu_stall = lu_ld_ex;
@@ -570,13 +575,19 @@ module core (
                  (exma_rd != 5'h0) && (exma_rd == rs1));
     wire lf_b = (exma_v && exma_mem && !exma_st && mld_done &&
                  (exma_rd != 5'h0) && (exma_rd == rs2));
+    wire cs_a = (exma_v && exma_csr && exma_wr && (exma_rd != 5'h0) &&
+                 (exma_rd == rs1));
+    wire cs_b = (exma_v && exma_csr && exma_wr && (exma_rd != 5'h0) &&
+                 (exma_rd == rs2));
     wire [31:0] fwd_a =
         lf_a ? load_rdata :
+        cs_a ? csr_rdata :
         (idex_v && idex_wr && (idex_rd == rs1) && (rs1 != 5'h0)) ? alu_res :
         (exma_wr && (exma_rd != 5'h0) && (exma_rd == rs1))       ? exma_res :
         (mawb_wr && (mawb_rd != 5'h0) && (mawb_rd == rs1))       ? mawb_res : rf_r1;
     wire [31:0] fwd_b =
         lf_b ? load_rdata :
+        cs_b ? csr_rdata :
         (idex_v && idex_wr && (idex_rd == rs2) && (rs2 != 5'h0)) ? alu_res :
         (exma_wr && (exma_rd != 5'h0) && (exma_rd == rs2))       ? exma_res :
         (mawb_wr && (mawb_rd != 5'h0) && (mawb_rd == rs2))       ? mawb_res : rf_r2;

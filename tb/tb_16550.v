@@ -56,6 +56,20 @@ module tb_16550;
         end
     endtask
 
+    // core-protocol register access: byte stores replicate data across all
+    // 4 lanes with SEL=1<<(addr[1:0]); loads: SEL=1111, addr = byte address,
+    // the CONSUMER extracts the lane. Helpers mirror that exactly.
+    reg [7:0] rb;
+    task wr_reg(input [2:0] r, input [7:0] v);
+        begin wb_wr({r[2], 2'b00}, {v, v, v, v}, 4'b0001 << r[1:0]); end
+    endtask
+    task rd_reg(input [2:0] r, input unused);
+        begin
+            wb_rd({r[2], 2'b00}, 4'b1111, w);
+            rb = w[8 * r[1:0] +: 8];
+        end
+    endtask
+
     // ---- RX bit driver (aligned to baud ticks) --------------------------
     task send_bit(input b);
         begin
@@ -129,7 +143,7 @@ module tb_16550;
 
     // ---- main ------------------------------------------------------------
     reg [31:0] w;
-    integer i;
+    integer i, nt0;
 
     initial begin
         // reset
@@ -143,16 +157,16 @@ module tb_16550;
         wb_wr(32'h0, 32'h48, 4'b0001);          // write R0 = 'H'
         wait_ticks(3);
         // LSR: TEMT should be 0 while shifting
-        wb_rd(32'h7, 4'b0001, w);
-        if (w[5] !== 1'b0) err("tx: temt=1 while shifting");
+        rd_reg(3'h7, 0);
+        if (rb[5] !== 1'b0) err("tx: temt=1 while shifting");
         wait_ticks(14);                         // whole char: 10 ticks + margin
         if (n_tx !== 1)          err("tx: no byte decoded");
         else if (last_b !== 8'h48) err("tx: wrong byte decoded");
         else                     ok("tx: byte decoded");
         if (stop_err !== 0) err("tx: bad stop bit");
         else                ok("tx: stop bits clean");
-        wb_rd(32'h7, 4'b0001, w);
-        if (w[5] !== 1'b1) err("tx: temt=0 after tx");
+        rd_reg(3'h7, 0);
+        if (rb[5] !== 1'b1) err("tx: temt=0 after tx");
 
         // --- TX drop when busy
         wb_wr(32'h0, 32'h55, 4'b0001);
@@ -191,75 +205,100 @@ module tb_16550;
         if (w[7:0] !== 8'h0) err("rx: fifo not empty after pop");
 
         // --- LSR: DR, THRE
-        wb_rd(32'h7, 4'b0001, w);
-        if (w[7:0] !== 8'b01100000) err("lsr: dr/temt/thre wrong");
+        rd_reg(3'h7, 0);
+        if (rb !== 8'b01100000) err("lsr: dr/temt/thre wrong");
         else                         ok("lsr: dr/temt/thre");
 
         // --- IER DR irq
-        wb_wr(32'h1, 32'h01, 4'b0001);          // IER bit0
+        wr_reg(3'h1, 8'h01);                // IER bit0
         wait_ticks(2);
         send_rx(8'h5A);
         wait_ticks(3);
         #1;
         if (!irq) err("irq: DR not asserted");
         else      ok("irq: DR asserted");
-        wb_rd(32'h2, 4'b0001, w);
-        if (w[7:0] !== 8'd6) err("iir: RDI value");
+        rd_reg(3'h2, 0);
+        if (rb !== 8'd6) err("iir: RDI value");
         else                 ok("iir: RDI value");
         wb_rd(32'h0, 4'b0001, w);              // pop
         wait_ticks(1);
         #1;
         if (irq) err("irq: DR still asserted after pop");
         else     ok("irq: DR deasserted");
-        wb_rd(32'h2, 4'b0001, w);
-        if (w[7:0] !== 8'd1) err("iir: no-irq value");
+        rd_reg(3'h2, 0);
+        if (rb !== 8'd1) err("iir: no-irq value");
 
         // --- IER THRE irq
-        wb_wr(32'h1, 32'h02, 4'b0001);          // IER bit1 only
+        wr_reg(3'h1, 8'h02);                // IER bit1 only
         wait_ticks(2);
         #1;
         if (!irq) err("irq: THRE not asserted");
         else      ok("irq: THRE asserted");
-        wb_rd(32'h2, 4'b0001, w);
-        if (w[7:0] !== 8'd7) err("iir: THR value");
+        rd_reg(3'h2, 0);
+        if (rb !== 8'd7) err("iir: THR value");
         else                 ok("iir: THR value");
 
         // --- SCR, MSR
-        wb_wr(32'h5, 32'hC5, 4'b0001);
-        wb_rd(32'h5, 4'b0001, w);
-        if (w[7:0] !== 8'hC5) err("scr: rw");
+        wr_reg(3'h5, 8'hC5);
+        rd_reg(3'h5, 0);
+        if (rb !== 8'hC5) err("scr: rw");
         else                  ok("scr: rw");
-        wb_rd(32'h4, 4'b0001, w);
-        if (w[7:0] !== 8'h9F) err("msr: value");
+        rd_reg(3'h4, 0);
+        if (rb !== 8'h9F) err("msr: value");
         else                  ok("msr: value");
 
         // --- frame error
         send_rx_badstop(8'h60);
         wait_ticks(2);
-        wb_rd(32'h7, 4'b0001, w);
-        if (w[3] !== 1'b1) err("lsr: FE not set");
+        rd_reg(3'h7, 0);
+        if (rb[3] !== 1'b1) err("lsr: FE not set");
         else               ok("lsr: FE set");
         wb_rd(32'h0, 4'b0001, w);              // dummy read clears FE
-        wb_rd(32'h7, 4'b0001, w);
-        if (w[3] !== 1'b0) err("lsr: FE not cleared");
+        rd_reg(3'h7, 0);
+        if (rb[3] !== 1'b0) err("lsr: FE not cleared");
 
         // --- overflow -> OE
         for (i = 0; i < 17; i = i + 1) begin
             send_rx(i[7:0]);
             wait_ticks(1);
         end
-        wb_rd(32'h7, 4'b0001, w);
-        if (w[1] !== 1'b1) err("lsr: OE not set");
+        rd_reg(3'h7, 0);
+        if (rb[1] !== 1'b1) err("lsr: OE not set");
         else               ok("lsr: OE set");
 
         // --- FCR rx reset
-        wb_wr(32'h2, 32'h01, 4'b0001);          // FCR rx reset
+        wr_reg(3'h2, 8'h01);                // FCR rx reset
         wait_ticks(2);
-        wb_rd(32'h7, 4'b0001, w);
-        if (w[1] !== 1'b0) err("lsr: OE not cleared by fcr");
+        rd_reg(3'h7, 0);
+        if (rb[1] !== 1'b0) err("lsr: OE not cleared by fcr");
         wb_rd(32'h0, 4'b0001, w);
         if (w[7:0] !== 8'h0) err("fifo: not empty after fcr reset");
         else                 ok("fifo: empty after fcr reset");
+
+        // --- U17: byte store to THR must not touch IER/FCR/LCR (p2 storm
+        //     regression: IER picked 0x5A from replicated data -> THRE irq)
+        wr_reg(3'h1, 8'h00);                     // IER = 0
+        wr_reg(3'h0, 8'h5A);                     // THR byte store (lane 0)
+        wait_ticks(14);
+        rd_reg(3'h1, 0);
+        if (rb !== 8'h00) err("u17: thr st clobbered ier");
+        else              ok("u17: thr st keeps ier");
+        #1;
+        if (irq !== 1'b0) err("u17: irq stuck after thr st");
+        else              ok("u17: irq low after thr st");
+        rd_reg(3'h2, 0);
+        if (rb !== 8'd1) err("u17: fcr lane clobbered");
+        else             ok("u17: fcr lane kept");
+        // --- U18: byte store to SCR must not start TX (old wrap bug: w_r0
+        //     saw SCR as THR on sel[3])
+        nt0 = n_tx;
+        wr_reg(3'h5, 8'h33);                     // SCR byte (grp4, lane 1)
+        wait_ticks(3);
+        if (n_tx !== nt0) err("u18: scr write started TX");
+        else            ok("u18: scr write no TX");
+        rd_reg(3'h5, 0);
+        if (rb !== 8'h33) err("u18: scr readback");
+        else              ok("u18: scr readback");
 
         // --- summary
         $display("============================================");

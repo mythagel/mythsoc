@@ -266,6 +266,41 @@ module tb_l1_d;
         else
             err("D9: hit B intact");
 
+        // ---- D12 device PAs NEVER cached (side-effect reads: PLIC claim,
+        //      UART pop). TB slave word idx = ADR[17:2]: 0x0C200004 -> word 1.
+        //      First re-fill 0x00001004 (evicted from set 1 by D9's 0xD024).
+        ram[16'h0001] = 32'h00000001;
+        dc_req(32'h0C200004, 1'b0, 32'h0);
+        if (q_done && q_stb === 9'd1 && q_data === 32'h00000001)
+            ok("D12: dev ld 1 on bus");
+        else err("D12: dev ld 1 on bus");
+        dc_req(32'h00001004, 1'b0, 32'h0);          // fill set-1 DRAM line
+        ram[16'h0001] = 32'h00000003;               // device state changes
+        dc_req(32'h0C200004, 1'b0, 32'h0);
+        if (q_done && q_stb === 9'd1 && q_data === 32'h00000003)
+            ok("D12: dev ld 2 fresh (no cache)");
+        else err("D12: dev ld 2 fresh (no cache)");
+        dc_req(32'h00001004, 1'b0, 32'h0);          // same-set line must survive
+        if (q_done && q_lat === 9'd1 && q_stb === 9'd0)
+            ok("D12: dev ld no evict");
+        else err("D12: dev ld no evict");
+        dc_req(32'h0C200004, 1'b1, 32'h00000001);   // complete write -> bus
+        if (q_done && q_stb === 9'd1 && ram[16'h0001] === 32'h00000001)
+            ok("D12: dev st hits bus");
+        else err("D12: dev st hits bus");
+        dc_req(32'h0C200004, 1'b0, 32'h0);
+        if (q_done && q_stb === 9'd1)               // still no fill
+            ok("D12: dev st/ld no fill");
+        else err("D12: dev st/ld no fill");
+        dc_req(32'h10000000, 1'b0, 32'h0);          // UART R0
+        if (q_done && q_stb === 9'd1)
+            ok("D12: uart reg on bus");
+        else err("D12: uart reg on bus");
+        dc_req(32'h0200BFF8, 1'b0, 32'h0);          // CLINT mtime lo
+        if (q_done && q_stb === 9'd1)
+            ok("D12: clint reg on bus");
+        else err("D12: clint reg on bus");
+
         // ---- D10 protocol balance: every STB got exactly one ACK
         if (stb_tot === ack_cnt && stb_tot > 0 && stb_cnt === 0)
             ok("D10: stb/ack balanced");

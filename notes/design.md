@@ -212,6 +212,10 @@ I-cache: 4 KiB, direct-mapped, 1-word lines (1024 x 32b), tag PA[31:12].
   Miss: stall IF, refill from memory (m0). fence.i & mret/sret: invalidate all.
   Throughput (tb I11): hit pulses DONE, stays IDLE -> sustained 1 hit/cyc.
 D-cache: 4 KiB, direct-mapped, 1-word lines, write-through, no-allocate on miss.
+  CACHEABLE WINDOW ONLY (sec.2): DRAM PA[31:22]==0x200 + ROM PA[31:22]==0.
+  Device PAs (CLINT/PLIC/UART) are strict pass-through: never hit, never fill
+  (reads have side effects: PLIC claim/pop, UART R0; a cached claim would skip
+  the atomic IP-clear -> interrupt storm; found in tb_soc p2).
   Load: hit->data 1 cyc (MA); miss->m1 read (stall MA, flush pipeline).
   Store: hit->write-through m1 (stall MA); miss->direct m1 write.
   Throughput (tb I11/D11): HIT path pulses DONE and stays in IDLE -> sustained
@@ -285,9 +289,15 @@ F. Perf: Dhrystone (embedded) cycle count -> DMIPS/MHz via TB cycle count;
         d=1 load-use bug fix + IPC measured (1/cyc hits; 0.667 steady loop)
   - [ ] C8 Sv32 regression (C8 program under satp)
 - [x] soc top (sim) + tb (hex firmware): core+wb_ic+{ROM,DRAM,16550,CLINT,
-      PLIC} wired (rtl/soc.v, wb_rom/wb_ram); tb/tb_soc 7 checks (periph
-      UART/CLINT/PLIC irq tests pending)
-- [ ] firmware: tests/*.S + build (clang)
+      PLIC} wired (rtl/soc.v, wb_rom/wb_ram); tb_soc 16 checks GREEN (boot,
+      UART rx irq via PLIC->meip, TX loopback echo, msip, mtime monotonic,
+      mcause/mepc latched) — session 18
+- [ ] firmware: tests/*.S + build (clang) — framework tests/fw_tb.S + harness
+      tb/tb_fw.v + scripts/fw_asm.sh + regress.sh:
+      A: t01_isa.S GENERATED (tools/isa_gen.py) 378 checks GREEN;
+      B: t02_traps.S 33 checks GREEN (T9 = CSR-forward d=1/d=2 regression);
+      C: t03_intr.S pending; D: t04_mmu.S pending; E: t05_soc.S pending;
+      F: dhrystone pending
 - [ ] full suite green
 - [ ] yosys synth + nextpnr + ecppack (bitstream) + fmax report
 - [ ] board lpf + openocd + boot stub (BRAM)

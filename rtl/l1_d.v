@@ -1,9 +1,12 @@
 // l1_d -- 4 KiB direct-mapped L1 data cache (mythrv32)
 //
 // 1-word lines: 1024 x 32b. Index PA[11:2], tag PA[31:12].
-// Write-through, no store-allocate: load miss fetches and fills;
-// store miss writes memory directly (line NOT filled); store hit
-// writes the line and writes through to memory.
+// Write-through; STORE miss writes memory directly (line NOT filled); store
+// hit writes line + writes through. LOAD miss fetches AND FILLS — but only
+// for the cacheable window (design.md sec.2: DRAM PA[31:22]==10'h200).
+// DEVICE PAs (PLIC/CLINT/UART/ROM) are strict pass-through: no hit ever,
+// no fill — device reads have side effects (PLIC claim, UART R0 pop) and
+// must never see stale line data (tb_soc p2 storm, session 17).
 // WB B4 master (SoC master m1, read/write): 1 STB pulse per transfer,
 // {WE,ADR,DAT} valid on the STB cycle, waits ACK_I (any latency >= 1),
 // 1 outstanding. No STALL/ERR/CYC (wb_ic sec.6 protocol).
@@ -43,6 +46,7 @@ module l1_d (
 );
 
     localparam W_IDLE = 3'd0, W_W1S = 3'd1, W_W1W = 3'd2;
+    localparam [9:0] DRAM_REG = 10'h200;   // PA[31:22] of DRAM (design.md sec.2)
     reg [1:0] st;
 
     reg        v   [0:1023];
@@ -54,7 +58,10 @@ module l1_d (
     reg        wen_r;
 
     wire [9:0]  idx = PA_I[11:2];
-    wire       hit = v[idx] && (tag[idx] == PA_I[31:12]);
+    // cacheable: DRAM (0x8000_0000) or ROM (0x0000_0000, immutable).
+    // Devices (CLINT/PLIC/UART) must NEVER fill/hit: reads have side effects.
+    wire        cacheable = (PA_I[31:22] == 10'h200) || (PA_I[31:22] == 10'h000);
+    wire       hit = cacheable && v[idx] && (tag[idx] == PA_I[31:12]);
 
     assign STB_O = (st == W_W1S);
     assign SEL_O = (st == W_W1S) && wen_r ? sel_r : 4'b1111;
@@ -103,11 +110,13 @@ module l1_d (
             W_W1S: st <= W_W1W;
             W_W1W: if (ACK_I) begin
                 if (!wen_r) begin
-                    // load miss: fill line
-                    v[adr_r[11:2]] <= 1'b1;
-                    tag[adr_r[11:2]] <= adr_r[31:12];
-                    mem[adr_r[11:2]] <= DAT_I;
+                    // load: data always from memory; fill ONLY cacheable lines
                     DATA_O <= DAT_I;
+                    if (adr_r[31:22] == DRAM_REG || adr_r[31:22] == 10'h000) begin
+                        v[adr_r[11:2]] <= 1'b1;
+                        tag[adr_r[11:2]] <= adr_r[31:12];
+                        mem[adr_r[11:2]] <= DAT_I;
+                    end
                 end
                 DONE_O <= 1'b1;
                 st <= W_IDLE;  // DONE cycle accepts 1-ahead REQ (hit or miss)

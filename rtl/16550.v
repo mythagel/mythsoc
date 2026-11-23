@@ -71,25 +71,27 @@ module u16550 #(
 
     // ---------------------------------------------------------- wb decode
     wire [2:0] byte_ofs = ADR_I[2:0];
-    // word position (0..7) of each register in a 4-byte transfer
-    wire [3:0] w_r0  = (4'd8 - {1'b0, byte_ofs}) & 4'h7;
-    wire [3:0] w_ier = (4'd9 - {1'b0, byte_ofs}) & 4'h7;
-    wire [3:0] w_iir = (4'd10 - {1'b0, byte_ofs}) & 4'h7;
-    wire [3:0] w_lcr = (4'd11 - {1'b0, byte_ofs}) & 4'h7;
-    wire [3:0] w_scr = (4'd13 - {1'b0, byte_ofs}) & 4'h7;
-    // register index of word byte b (mod 8)
-    wire [2:0] r0 = byte_ofs, r1 = byte_ofs + 3'd1,
-               r2 = byte_ofs + 3'd2, r3 = byte_ofs + 3'd3;
-
-    wire reg0_wr = STB_I && WE_I  && (w_r0 < 4) && SEL_I[w_r0[1:0]];
-    wire reg0_rd = STB_I && !WE_I && (w_r0 < 4) && SEL_I[w_r0[1:0]];
-    wire reg2_wr = STB_I && WE_I  && (w_iir < 4) && SEL_I[w_iir[1:0]];
-    // word bytes hitting each register
-    wire [7:0] b_r0  = DAT_I[8*w_r0[1:0]  +: 8];
-    wire [7:0] b_ier = DAT_I[8*w_ier[1:0] +: 8];
-    wire [7:0] b_iir = DAT_I[8*w_iir[1:0] +: 8];
-    wire [7:0] b_lcr = DAT_I[8*w_lcr[1:0] +: 8];
-    wire [7:0] b_scr = DAT_I[8*w_scr[1:0] +: 8];
+    // 4-byte window covers regs {0..3} (grp4=0) or {4..7} (grp4=1); byte
+    // lane L (SEL_I[L]) hits reg {grp4,L}. Access MUST gate on the SEL lane
+    // of that register: a byte store to one register must not clobber
+    // others (the old (8+k-ofs) lane math wrote IER from a THR byte store
+    // -- THRE irq stuck high, tb_soc p2 storm -- and started TX from an
+    // SCR/MSR byte store; session 17).
+    wire       grp4  = byte_ofs[2];
+    wire reg0_wr = STB_I && WE_I  && !grp4 && SEL_I[0];   // THR (TX start)
+    wire reg0_rd = STB_I && !WE_I && !grp4 && SEL_I[0];   // RBR pop
+    wire wr_ier  = STB_I && WE_I  && !grp4 && SEL_I[1];
+    wire reg2_wr = STB_I && WE_I  && !grp4 && SEL_I[2];   // FCR
+    wire wr_lcr  = STB_I && WE_I  && !grp4 && SEL_I[3];
+    wire wr_scr  = STB_I && WE_I  &&  grp4 && SEL_I[1];
+    wire rd_iir  = STB_I && !WE_I && !grp4 && SEL_I[2];   // IIR sample
+    // value lanes (sub-word store data is replicated by the core; lane
+    // choice is irrelevant for them, and full-word uses the true lanes)
+    wire [7:0] b_r0  = DAT_I[7:0];
+    wire [7:0] b_ier = DAT_I[15:8];
+    wire [7:0] b_iir = DAT_I[23:16];
+    wire [7:0] b_lcr = DAT_I[31:24];
+    wire [7:0] b_scr = DAT_I[15:8];
     wire fcr_sel = iir_last[0];            // FIFO mode: always
     wire fwr_reset = reg2_wr && fcr_sel && b_iir[0];
     wire ftx_reset = reg2_wr && fcr_sel && b_iir[1];
@@ -213,51 +215,36 @@ module u16550 #(
             if (STB_I) begin
                 ACK_O <= 1;
                 if (WE_I) begin
-                    if (w_r0 < 4) begin oe <= 0; fe <= 0; end
-                    if (w_ier < 4) ier <= {ier[1], b_ier[1], b_ier[0]};
-                    if (w_iir < 4) fcr <= b_iir;
-                    if (w_lcr < 4) lcr <= b_lcr;
-                    if (w_scr < 4) scr <= b_scr;
+                    if (reg0_wr) begin oe <= 0; fe <= 0; end
+                    if (wr_ier) ier <= b_ier[1:0];
+                    if (reg2_wr) fcr <= b_iir;
+                    if (wr_lcr) lcr <= b_lcr;
+                    if (wr_scr) scr <= b_scr;
                 end else begin
-                    if (w_iir < 4 && SEL_I[w_iir[1:0]]) iir_last <= iir;
-                    case (r0)
-                    R_RXFIFO: DAT_O[7:0]  <= pop1 ? mem[frd] : 8'h0;
-                    R_IER:    DAT_O[7:0]  <= {6'h0, ier};
-                    R_IIR_FCR: DAT_O[7:0] <= {5'h0, iir};
-                    R_MSR:    DAT_O[7:0]  <= 8'h9F;
-                    R_SCR:    DAT_O[7:0]  <= scr;
-                    R_LSR:    DAT_O[7:0]  <= lsr;
-                    default:  DAT_O[7:0]  <= 8'h0;
-                    endcase
-                    case (r1)
-                    R_RXFIFO: DAT_O[15:8] <= pop1 ? mem[frd] : 8'h0;
-                    R_IER:    DAT_O[15:8] <= {6'h0, ier};
-                    R_IIR_FCR: DAT_O[15:8] <= {5'h0, iir};
-                    R_MSR:    DAT_O[15:8] <= 8'h9F;
-                    R_SCR:    DAT_O[15:8] <= scr;
-                    R_LSR:    DAT_O[15:8] <= lsr;
-                    default:  DAT_O[15:8] <= 8'h0;
-                    endcase
-                    case (r2)
-                    R_RXFIFO: DAT_O[23:16] <= pop1 ? mem[frd] : 8'h0;
-                    R_IER:    DAT_O[23:16] <= {6'h0, ier};
-                    R_IIR_FCR: DAT_O[23:16] <= {5'h0, iir};
-                    R_MSR:    DAT_O[23:16] <= 8'h9F;
-                    R_SCR:    DAT_O[23:16] <= scr;
-                    R_LSR:    DAT_O[23:16] <= lsr;
-                    default:  DAT_O[23:16] <= 8'h0;
-                    endcase
-                    case (r3)
-                    R_RXFIFO: DAT_O[31:24] <= pop1 ? mem[frd] : 8'h0;
-                    R_IER:    DAT_O[31:24] <= {6'h0, ier};
-                    R_IIR_FCR: DAT_O[31:24] <= {5'h0, iir};
-                    R_MSR:    DAT_O[31:24] <= 8'h9F;
-                    R_SCR:    DAT_O[31:24] <= scr;
-                    R_LSR:    DAT_O[31:24] <= lsr;
-                    default:  DAT_O[31:24] <= 8'h0;
-                    endcase
+                    if (rd_iir) iir_last <= iir;
+                    DAT_O[7:0]  <= rb0;
+                    DAT_O[15:8] <= rb1;
+                    DAT_O[23:16] <= rb2;
+                    DAT_O[31:24] <= rb3;
                 end
             end
+        end
+    end
+
+    // read lane values: aligned 4-byte window, lane L -> reg {grp4, L}
+    // (0 RBR/THR, 1 IER, 2 IIR, 3 LCR | 4 MSR, 5 SCR, 6 -, 7 LSR)
+    reg  [7:0] rb0, rb1, rb2, rb3;
+    always @(*) begin
+        if (!grp4) begin
+            rb0 = pop1 ? mem[frd] : 8'h00;      // RBR (pop advances FIFO)
+            rb1 = {6'h0, ier};
+            rb2 = {5'h0, iir};
+            rb3 = lcr;
+        end else begin
+            rb0 = 8'h9F;                        // MSR: THD|TEMT (RO)
+            rb1 = scr;
+            rb2 = 8'h00;
+            rb3 = lsr;
         end
     end
 

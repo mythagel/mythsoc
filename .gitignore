@@ -1,0 +1,12 @@
+build/
+*.o
+*.elf
+*.bin
+*.vvp
+__pycache__/
+/tb_soc*.vcd
+m.S
+m.o
+t4.S
+tc.S
+tn.S
