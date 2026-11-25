@@ -12,5 +12,5 @@
     - Ensure tables are accurate - use PDF skill or convert to image and read directly.
 4. Keep notes on progress in notes/ and re-read them after following step 6.
 5. No webfetch
-6. As proof of having read this, as the FIRST thing you do, reiterate these rules.
+6. As proof of having read this, as the FIRST thing you do at session start, reiterate these rules.
 
