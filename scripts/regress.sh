@@ -1,7 +1,7 @@
 #!/bin/sh
 # regress.sh -- full test-suite runner (module benches + core + firmware suite).
 #   usage: scripts/regress.sh [name ...]     (default: all)
-# Names: mmu l1_i l1_d wb_ic 16550 clint plic core c8 soc t01 t02
+# Names: mmu l1_i l1_d wb_ic 16550 clint plic core c8 soc t01 t02 t03
 set -e
 cd "$(dirname "$0")/.."
 RTL="rtl/soc.v rtl/core.v rtl/mmu.v rtl/l1_i.v rtl/l1_d.v rtl/wb_ic.v rtl/wb_ic_mfifo.v rtl/wb_rom.v rtl/wb_ram.v rtl/16550.v rtl/clint.v rtl/plic.v"
@@ -9,16 +9,18 @@ CORE_RTL="rtl/core.v rtl/mmu.v rtl/l1_i.v rtl/l1_d.v"
 OUT=${OUT:-/tmp/opencode/regress}
 mkdir -p "$OUT"
 TARGETS="$*"
-[ -z "$TARGETS" ] && TARGETS="mmu l1_i l1_d wb_ic 16550 clint plic core c8 t01 t02 soc"
+[ -z "$TARGETS" ] && TARGETS="mmu l1_i l1_d wb_ic 16550 clint plic core c8 t01 t02 t03 soc"
 FAIL=0
 
-run() { # name build-cmd
+run() { # name build-cmd [vvp plusargs...]
     n=$1; shift
+    build=$1; shift
+    PA="$*"
     echo "== $n"
     # shellcheck disable=SC2068
-    sh -c "$1" > "$OUT/$n.build.log" 2>&1 || { echo "  BUILD-FAIL (see $OUT/$n.build.log)"; FAIL=1; return; }
+    sh -c "$build" > "$OUT/$n.build.log" 2>&1 || { echo "  BUILD-FAIL (see $OUT/$n.build.log)"; FAIL=1; return; }
     RC=0
-    timeout ${WDT_SEC:-600} vvp "$OUT/$n.vvp" > "$OUT/$n.log" 2>&1 || RC=$?
+    timeout ${WDT_SEC:-600} vvp "$OUT/$n.vvp" $PA > "$OUT/$n.log" 2>&1 || RC=$?
     if [ $RC -ne 0 ]; then echo "  RUN-FAIL rc=$RC (see $OUT/$n.log)"; tail -5 "$OUT/$n.log"; FAIL=1; return; fi
     if grep -q "ALL TESTS PASSED" "$OUT/$n.log"; then
         grep "ALL TESTS PASSED" "$OUT/$n.log" | sed 's/^/  /'
@@ -40,6 +42,7 @@ for n in $TARGETS; do
     c8)    run c8 "sh scripts/core_asm.sh tb/tb_c8.S tb/tb_c8.hex /tmp/opencode/c8_exp.vh && sed 's/C1_NCOMMIT/C8_NCOMMIT/' /tmp/opencode/c8_exp.vh > tb/tb_c8_exp.vh && iverilog -g2005 -s tb_c8 tb/tb_c8.v $CORE_RTL -o $OUT/c8.vvp" "" ;;
     t01)   run t01 "sh scripts/fw_asm.sh tests/t01_isa.S tb/t_fw_t01.hex && iverilog -g2005 -s tb_fw -DROM_HEX='\"tb/t_fw_t01.hex\"' tb/tb_fw.v $RTL -o $OUT/t01.vvp" "" ;;
     t02)   run t02 "sh scripts/fw_asm.sh tests/t02_traps.S tb/t_fw_t02.hex && iverilog -g2005 -s tb_fw -DROM_HEX='\"tb/t_fw_t02.hex\"' tb/tb_fw.v $RTL -o $OUT/t02.vvp" "" ;;
+    t03)   run t03 "sh scripts/fw_asm.sh tests/t03_intr.S tb/t_fw_t03.hex && iverilog -g2005 -s tb_fw -DROM_HEX='\"tb/t_fw_t03.hex\"' tb/tb_fw.v $RTL -o $OUT/t03.vvp" "+LOOP" ;;
     soc)   run soc "sh scripts/soc_asm.sh tb/tb_soc_fw.S tb/tb_soc_fw.hex && iverilog -g2005 -s tb_soc tb/tb_soc.v $RTL -o $OUT/soc.vvp" "" ;;
     *) echo "unknown target: $n"; FAIL=1 ;;
     esac

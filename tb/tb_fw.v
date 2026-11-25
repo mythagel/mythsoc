@@ -24,8 +24,8 @@ module tb_fw;
         begin passes = passes + 1; $display("PASS: %0s", s); end
     endtask
 
-    // UART RX held idle (1); tests that need RX drive it via dut ports later
-    // (loopback mux kept for UART tests: loop=1 feeds txd to rxd).
+    // UART RX held idle (1); +LOOP feeds txd to rxd (16550 loopback, used
+    // by tests that drive the UART from the firmware side).
     reg rxd_r = 1'b1;
     reg loop = 1'b0;
     wire txd;
@@ -48,8 +48,58 @@ module tb_fw;
         end
     endtask
 
+    // heartbeat (diagnostics): +HB prints core state every 2000 cycles
+    integer hbn;
+    initial begin
+        if ($test$plusargs("HB")) begin
+            hbn = 0;
+            while (hbn < 200) begin
+                repeat (2000) @(negedge clk);
+                if (hbn == 1) begin  // per-cycle window at HB1
+                    repeat (60) begin
+                        @(negedge clk);
+                        $display("  C stall=%b mawait=%b pawait=%b mldone=%b reqld=%b ld_mio=%b idex_v=%b exma_v=%b mawb_v=%b ifid_v=%b fpc=%h exma_pc=%h l1d_st=%0d",
+                                 dut.core0.stall, dut.core0.ma_wait, dut.core0.pa_wait,
+                                 dut.core0.mld_done, dut.core0.req_ld, dut.core0.ld_mio,
+                                 dut.core0.idex_v, dut.core0.exma_v, dut.core0.mawb_v,
+                                 dut.core0.ifid_v, dut.core0.fpc, dut.core0.exma_pc,
+                                 dut.core0.l1d.st);
+                    end
+                end
+                $display("HB %0d fpc=%h exma_pc=%h st=%0d l1d_st=%0d m1stb=%b m1ack=%b",
+                         hbn, dut.core0.fpc, dut.core0.exma_pc, dut.core0.stall,
+                         dut.core0.l1d.st, dut.core0.m1_stb, dut.core0.m1_ack);
+                $display("   mio=%b pav=%b pavf=%b lio=%b dmio=%b dlio=%b fqc=%0d mmui_st=%0d mmui_req=%b mmui_done=%b",
+                         dut.core0.mio, dut.core0.pav, dut.core0.pav_f,
+                         dut.core0.lio, dut.core0.d_mio, dut.core0.d_lio,
+                         dut.core0.fq_c, dut.core0.mmu_i.st,
+                         dut.core0.mmu_i.REQ_I, dut.core0.mmu_i.DONE_O);
+                $display("   ifid_v=%b idex_v=%b exma_v=%b mawb_v=%b lu=%b stallif=%b div=%b pawait=%b mawait=%b l1i_st=%0d l1done=%b",
+                         dut.core0.ifid_v, dut.core0.idex_v, dut.core0.exma_v,
+                         dut.core0.mawb_v, dut.core0.lu_stall, dut.core0.stall_if,
+                         dut.core0.div_stall, dut.core0.pa_wait, dut.core0.ma_wait,
+                         dut.core0.l1i.st, dut.core0.l1_done);
+                hbn = hbn + 1;
+            end
+        end
+    end
+
+    // +VCD: dump core + ic + peripheral hierarchies for freeze forensics.
+    // Parse with tools/vcd_last.py <vcd> <keep-samples> [substr ...].
+    initial begin
+        if ($test$plusargs("VCD")) begin
+            $dumpfile("/tmp/opencode/tb_fw.vcd");
+            $dumpvars(0, dut.core0);
+            $dumpvars(0, dut.ic0);
+            $dumpvars(0, dut.s2uart);
+            $dumpvars(0, dut.s3clint);
+            $dumpvars(0, dut.s4plic);
+        end
+    end
+
     integer t;
     initial begin
+        if ($test$plusargs("LOOP")) loop = 1;
         @(negedge clk); rst = 1;
         repeat (3) @(negedge clk); rst = 0;
 
