@@ -683,7 +683,12 @@ module core (
     wire md_fresh_fault = fresh_md ? mmd_fault  : md_pv_f;
     wire md_fresh_cause = fresh_md ? mmd_cause : md_pv_c;
 
-    wire fresh_md = mmd_done && !d_md && !flush;
+    // NB: NO !flush term here. flush->redirect->int_fire->(!stall)->pa_wait
+    // ->pa_now_c->fresh_md->(!flush) is a combinational loop (odd inverter
+    // count: oscillates -> vvp zero-delay delta storm, the t03 hang; verilator
+    // UNOPTFLAT on soc.core0.stall). A flush's dead op is discarded by the
+    // flush-clear of md_pv/d_md/exma_mem_q, not by fresh_md.
+    wire fresh_md = mmd_done && !d_md;
     wire pa_now_c = md_pv || fresh_md;
     assign pa_wait = idex_v && idex_mem && !pa_now_c;
     assign req_md  = idex_v && idex_mem && !md_mio && !md_pv && !d_md

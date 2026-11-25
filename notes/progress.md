@@ -1,5 +1,63 @@
 # progress
 
+## 2026-11-25 (session 19)
+- "Investigate and fix the hang" (t03): COMBINATIONAL LOOP FOUND + FIXED,
+  residual t03 issue handed off (see bottom).
+- Symptom: t03 (first fw test with PLIC meip/seip LIVE) -> vvp 100% CPU,
+  sim TIME frozen (not just slow): first ~10k cyc at normal rate, then zero
+  progress forever; RC=124 on every timeout. Loopback (+LOOP) NOT involved
+  (no-LOOP run freezes identically). Pipe was advancing right up to the
+  freeze (~cyc 13681, P9 S-phase) -> zero-delay delta storm, not a logical
+  deadlock (re-verify: HB deltas + VCD, don't assume).
+- Detection: `verilator --lint-only --timing -Wall -Wno-fatal -top soc
+  rtl/soc.v rtl/core.v rtl/mmu.v rtl/l1_i.v rtl/l1_d.v rtl/wb_ic.v
+  rtl/wb_ic_mfifo.v rtl/wb_rom.v rtl/wb_ram.v rtl/16550.v rtl/clint.v
+  rtl/plic.v` -> `%Warning-UNOPTFLAT ... Circular combinational logic:
+  'soc.core0.stall'` (rtl/core.v:96). Verilator's static comb-loop detector;
+  iverilog has no equivalent (a loop only "works" if it happens to settle;
+  odd-inverter loops oscillate when a state-dependent input goes live).
+  Pre-existing benign notes: BLKLOOPINIT "delayed assignment to array
+  inside for loops" on mmu/l1 arrays (keep -Wno-fatal).
+- THE LOOP (rtl/core.v): stall -> pa_wait -> !pa_now_c -> fresh_md ->
+  !flush -> flush -> int_fire -> !stall. Closes ONLY when int_fire is live
+  (pending PLIC int + MIE/SIE) -> why t01/t02/soc (no live ints) were
+  green. FIX: fresh_md = mmd_done && !d_md (drop !flush). A flush's dead
+  op is discarded by flush-clearing md_pv/d_md/exma_mem_q (exma_df_q
+  gated by idex_v); fresh_md needs no !flush. Flush-cycle behavior: 1
+  fewer pa_wait cycle on a dead op (harmless, fq flushed anyway).
+- Forensics tools (now in tree): tb/tb_fw.v +VCD ($dumpfile
+  /tmp/opencode/tb_fw.vcd + $dumpvars core0/ic0/s2uart/s3clint/s4plic) +
+  tools/vcd_last.py <vcd> <keep> [substr...]: per-sample changes +
+  cumulative value table at the (frozen) last timestamp. VCD parse gotchas
+  baked into the tool: $var fields = [type width id name] (id may be a
+  bare '#'), do NOT partition header on first '#' char, 1-bit changes are
+  "<v><id>" without space.
+- LESSON: on "hang" check sim-time progress FIRST (VCD last-# or HB wall
+  time). Rate crawl vs frozen-time vs zero-delay storm are different
+  beasts; this one was storm #3 (sessions 16/17 had storm+crawl classes).
+  Verilator lint is cheap and should be run on any stall-class hang.
+- HANDOFF (next agent, t03): rtl fix is in; full suite green except t03
+  (ran: mmu l1_i l1_d wb_ic 16550 clint plic core c8 t01 t02 soc). t03
+  now PROGRESSES (P1-P8 checks all pass; no fw_fail) but livelocks in the
+  P9 S-phase: fpc repeats an 11-HB (~22000 cyc) period of handler hops
+  (0xa74/0xbf4/0x75c/0xab8 = m_hnd/h_mret/s_hnd/s_code region, priv
+  S/M bouncing) at ~1.4k cyc/s, no WDT marker. P9 arms: stimecmp via
+  0x02004004 overlap word, sstip, mtip fan-out 10/11, msip M-from-S,
+  sret/mret MPP juggling, SIE=0->1 gate, EN0 0x88A->0x8A restore, and
+  expects s_count=3 (ids 2,6,10) + m_count 14 + 1 more M entry (11,
+  latched while ctx0-disabled). Suspects: (a) h_stmr clears
+  stimecmp_hi(0x4008) with -1 -> word 0x1002 = stimecmp_hi ONLY? (it is:
+  ADR word idx 0x4008>>2=0x1002; OK) but stimecmp_LO (0x4004) still
+  T2+60 with mtime>>T2+60 -> src6 REFIRES forever if the S handler never
+  runs after SIE=1 ordering slips; (b) mret-into at sret of s_code
+  (MPP=M set at 0x740?) re-arms msip at the sret; (c) PLIC ctx1 claim
+  vs complete ID. Repro: scripts/regress.sh t03 (or vvp +LOOP +HB);
+  instrument s_hnd entries (s_count/s_hist) via VCD or DRAM.
+- Files: rtl/core.v (1-line fix + comment), tb/tb_fw.v (+VCD; +HB/+LOOP/
+  +DUMP already WIP), tools/vcd_last.py (new), tests/t03_intr.S +
+  tb/t_fw_t03.hex + scripts/regress.sh t03 target (WIP, committed for
+  handoff).
+
 ## 2026-11-23 (session 18)
 - tb_soc 16/16 GREEN. Two real RTL bugs found by the end-to-end p2 echo phase:
   (1) l1_d CACHED DEVICE READS (load-miss filled any line incl. PLIC/UART/
