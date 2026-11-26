@@ -42,7 +42,7 @@ for n in $TARGETS; do
     c8)    run c8 "sh scripts/core_asm.sh tb/tb_c8.S tb/tb_c8.hex /tmp/opencode/c8_exp.vh && sed 's/C1_NCOMMIT/C8_NCOMMIT/' /tmp/opencode/c8_exp.vh > tb/tb_c8_exp.vh && iverilog -g2005 -s tb_c8 tb/tb_c8.v $CORE_RTL -o $OUT/c8.vvp" "" ;;
     t01)   run t01 "sh scripts/fw_asm.sh tests/t01_isa.S tb/t_fw_t01.hex && iverilog -g2005 -s tb_fw -DROM_HEX='\"tb/t_fw_t01.hex\"' tb/tb_fw.v $RTL -o $OUT/t01.vvp" "" ;;
     t02)   run t02 "sh scripts/fw_asm.sh tests/t02_traps.S tb/t_fw_t02.hex && iverilog -g2005 -s tb_fw -DROM_HEX='\"tb/t_fw_t02.hex\"' tb/tb_fw.v $RTL -o $OUT/t02.vvp" "" ;;
-    t03)   run t03 "sh scripts/fw_asm.sh tests/t03_intr.S tb/t_fw_t03.hex && iverilog -g2005 -s tb_fw -DROM_HEX='\"tb/t_fw_t03.hex\"' tb/tb_fw.v $RTL -o $OUT/t03.vvp" "+LOOP" ;;
+    t03)   run t03 "sh scripts/fw_build.sh tests/t03_intr.c tb/t_fw_t03.hex && iverilog -g2005 -s tb_fw -DROM_HEX='\"tb/t_fw_t03.hex\"' tb/tb_fw.v $RTL -o $OUT/t03.vvp" "+LOOP" ;;
     soc)   run soc "sh scripts/soc_asm.sh tb/tb_soc_fw.S tb/tb_soc_fw.hex && iverilog -g2005 -s tb_soc tb/tb_soc.v $RTL -o $OUT/soc.vvp" "" ;;
     *) echo "unknown target: $n"; FAIL=1 ;;
     esac

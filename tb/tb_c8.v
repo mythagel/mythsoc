@@ -94,7 +94,7 @@ module tb_c8;
 
     // ---------------- counters / guards ----------------
     integer exp  [0:31];
-    integer mexp [0:31];
+    integer mexp [0:32];
     integer nc = 0;                       // retired instructions
     always @(posedge clk) if (dut.commit) nc = nc + 1;
     integer fq_ovf = 0;                  // fetch FIFO overflow guard (bug if set)
@@ -102,7 +102,7 @@ module tb_c8;
 
     integer i, bad, t;
     initial begin
-        for (i = 0; i < 32; i = i + 1) mexp[i] = 32'h0;
+        for (i = 0; i < 33; i = i + 1) mexp[i] = 32'h0;
         `include "tb/tb_c8_exp.vh"
         for (i = 0; i < 4096; i = i + 1) begin
             irom[i] = 32'h00000013;      // ADDI x0,x0,0 (nop) past program
@@ -156,15 +156,16 @@ module tb_c8;
         if (dram[29] !== mexp[29]) err("C8-T21 b2b ovr");    else ok("C8-T21 b2b ovr");
         if (dram[30] !== mexp[30]) err("C8-T22 alu d1 mix"); else ok("C8-T22 alu d1 mix");
         if (dram[31] !== mexp[31]) err("C8-T23 rem b2b");    else ok("C8-T23 rem b2b");
+        if (dram[32] !== mexp[32]) err("C8-T24 csr-vs-younger"); else ok("C8-T24 csr-vs-younger");
         // full scoreboard array (catches anything the named checks miss)
         bad = 0;
-        for (i = 0; i < 32; i = i + 1) begin
+        for (i = 0; i < 33; i = i + 1) begin
             if (dram[i] !== mexp[i]) begin
                 bad = bad + 1;
                 $display("  score[%0d] got %h exp %h", i, dram[i], mexp[i]);
             end
         end
-        if (bad) err("C8 scoreboard32");   else ok("C8-scoreboard32");
+        if (bad) err("C8 scoreboard33");   else ok("C8-scoreboard33");
 
         // ---- final register file vs golden ----
         bad = 0;

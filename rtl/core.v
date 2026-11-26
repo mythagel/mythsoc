@@ -566,6 +566,15 @@ module core (
     // d=1/d=2 hole — its result rides csr_rdata in MA -> mawb_res, never
     // alu_res/exma_res. Hold the consumer one cycle and forward csr_rdata
     // from exma (d=2), exactly like loads.
+    // NB (t03 session 20): a CSR in MA does NOT park the pipe (no ma_wait),
+    // so a YOUNGER producer of the same rd legitimately sits in EX (csrr
+    // a0,stval@MA || lui a0,0x80000@EX || mv a2,a0@ID). cs_a must yield to
+    // the idex match or the older CSR result overwrites it (a2=0 -> S-mode
+    // handlers stored the scoreboard to a corrupt PA; dram[100] lost).
+    // Loads are immune: ma_wait parks the pipeline, so lf_a never coexists
+    // with a younger idex match of the same rd.
+    wire idex_wr_a = idex_v && idex_wr && (idex_rd == rs1) && (rs1 != 5'h0);
+    wire idex_wr_b = idex_v && idex_wr && (idex_rd == rs2) && (rs2 != 5'h0);
     wire lu_ld_ex = ((idex_v && idex_mem && !idex_st && (idex_rd != 5'h0)) ||
                      (idex_v && idex_csr && idex_wr && (idex_rd != 5'h0))) &&
                    ((rs1 == idex_rd && rs1 != 5'h0) ||
@@ -576,9 +585,9 @@ module core (
     wire lf_b = (exma_v && exma_mem && !exma_st && mld_done &&
                  (exma_rd != 5'h0) && (exma_rd == rs2));
     wire cs_a = (exma_v && exma_csr && exma_wr && (exma_rd != 5'h0) &&
-                 (exma_rd == rs1));
+                 (exma_rd == rs1)) && !idex_wr_a;
     wire cs_b = (exma_v && exma_csr && exma_wr && (exma_rd != 5'h0) &&
-                 (exma_rd == rs2));
+                 (exma_rd == rs2)) && !idex_wr_b;
     wire [31:0] fwd_a =
         lf_a ? load_rdata :
         cs_a ? csr_rdata :

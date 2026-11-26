@@ -180,4 +180,16 @@ t20loop:
     remu  x6, x5, x4             # d=1: x6 = 2 % 3 = 2 (x5 from d=1)
     sw    x6, 124(x1)           # slot31
 
+    # ---- T24: CSR-in-MA vs younger same-rd producer (t03 forwarding hole) ----
+    # csrr parks x2 in MA when the consumer is in ID (d=2); the lui between
+    # redefines x2 at d=1. The younger d=1 must win; if the CSR mux outranks
+    # it, mv gets 0xC0FFEE (the session-20 t03 P9 bug).
+    li    x4, 0xC0FFEE
+    csrw  mscratch, x4
+    csrr  x2, mscratch
+    lui   x2, 0x80000
+    mv    x3, x2                # 0x8000_0000 (not 0xC0FFEE)
+    addi  x3, x3, 7
+    sw    x3, 128(x1)           # slot32 = 0x80000007
+
 1:  j     1b                    # halt (self-loop)

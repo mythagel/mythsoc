@@ -1,5 +1,65 @@
 # progress
 
+## 2026-11-26 (session 20)
+- t03 C PORT COMPLETE: session-19 HANDOFF closed. FULL suite green incl.
+  t03 (61 fw checks): mmu 59, l1_i 28, l1_d 31, wb_ic 25, 16550 21,
+  clint 36, plic 24, core 54, c8 34, t01 378, t02 33, t03 61, soc 16.
+- THE REAL BUG (was NOT the .S P9 livelock cause, found while debugging
+  the C port): core.v ID-side forwarding priority. cs_a/cs_b (CSR-in-MA
+  term) outranked the younger d=1 idex term. Pattern csrr a0,csr@MA ||
+  lui a0,imm@EX || mv a2,a0@ID: consumer got the OLD csr_rdata instead of
+  the lui result. In t03 s_hnd_c this zeroed the scoreboard base -> M/S
+  hist stores landed at PA 0x190 (ROM alias) / 0xF40C0E80. Fix: gate
+  cs_a/cs_b with !idex_wr_a/!idex_wr_b (rtl/core.v ~554-600 + comment).
+  Loads immune: ma_wait parks the pipe so lf_a never coexists with a
+  younger idex match; CSRs don't park. Trap-entry redirect shifts the
+  csrr@MA||lui@EX alignment -> only the S handler hit it, m_hnd_c escaped
+  (clang didn't reuse rd in its csrr chain).
+- C8 T24 regression guard (tb/tb_c8.S/.v): the exact pattern above,
+  slot32 = 0x80000007. NEGATIVE-verified: un-gating cs_a/cs_b makes T24
+  fail (got 0xC0FFF5). c8 now 34 checks.
+- HW SEMANTICS learned (drove the P9 restructure, RTL all correct):
+  (1) int_fire requires a NON-branch clean retire (core.v:959
+  !branch_committed). A 2-instr spin (lui-hoisted lw; branch-back) commits
+  ONLY branches -> a pending seip is masked for the whole loop (~36 ticks
+  observed: src10 latched at t+21, entry delayed to t+60 = the src6
+  deadline, so the claim saw a 6/10 prio tie and returned low ID 6).
+  Spin loops in tests MUST be >=3 instrs with a non-branch retire
+  (e.g. counter addi; lw; bne). WM()'s lw;beq spin can delay (never
+  lose) M-mode entries; kept but documented.
+  (2) Trap replaces the NEXT instruction: interrupt epc = interrupted
+  PC+4, and a store scheduled before that PC has NOT retired (mode-3
+  csr_set(MIE) mid-shim -> re-entrant M trap inside m_shim overwrote
+  mepc -> context corruption storm. m_hnd_c mode 3 must NOT set MIE:
+  trap entry cleared it, mret restores MIE<-MPIE, so src3 fires on the
+  first post-mret retire = p10 WM loop. Same rule made msip-arm-in-main
+  wrong (replaced the dram[99]=2 store -> handler read stale 0): arm it
+  in s_phase right after the SIE csrs.
+- t03 P9 final design (deterministic, HW-verified): main drains stale ctx1
+  IP (src10 latched by P3-P6 MTIP arms) via CLAIM1/COMPLETE loop; s_phase:
+  SIE csrs -> msip arm (M#12 replaces csrs, mode 2 mret re-executes it,
+  that retire IS the S1 entry, epc 0x1104); s_wait2 arms stimecmp t+60
+  (MTC_OV first, then STC_HI=0 - order matters: reversed leaves
+  stimecmp={0,0} between the WBs -> instant src6 fire) + MTIP=1;
+  S-hist {2,6,10} with epcs proving timing; s_wait3 diverted by src7
+  mode 4 -> after_s (EN0 restore claims ctx0-disabled ip[11] once);
+  p10 mret-into-interrupt. Note: .S oracle's {2,6,10} was coincidental,
+  never HW-verified; C version keeps it as tie-break outcome.
+- tb_fw.v monitors (permanent): +BUSMON (CLINT CW/CR bus ops, scoreboard
+  RW changes, TRP/XRT trap+xret events), +DMON extended (pc= on L1REQ,
+  DM-MDREQ/DM-MDDONE VA/PA/mode - this localised the forwarding bug to
+  s_hnd_c's store window), +MTCMON, +TRACE (ENT lines label M/S from
+  dram[20] - cosmetic: S entries print 'M' once m_hist_n>0, ignore).
+- C fw framework (new, committed): scripts/fw_build.sh (clang -target
+  riscv32-unknown-elf -march=rv32im -O2 + scripts/link.lds: dram[] first
+  at 0x8000_0000) + tools/fw_ranges.py build gate (verifies every
+  in_range() SPAN against linked ELF symbol sizes) + tests/fw_entry.S
+  (M/S stacks) + tests/fw_traps.S (m_shim/s_shim full-context save) +
+  tests/lib.h + tests/t03_intr.c. tests/t03_intr.S deleted (port source:
+  git 40f0f3a).
+- next: t04 (MMU/Sv32 on SoC, tools/ptmap.py), t05 SoC e2e, dhrystone,
+  C8-Sv32 on-core, synth yosys->nextpnr-ecp5->ecppack, board lpf, README.
+
 ## 2026-11-25 (session 19)
 - "Investigate and fix the hang" (t03): COMBINATIONAL LOOP FOUND + FIXED,
   residual t03 issue handed off (see bottom).
