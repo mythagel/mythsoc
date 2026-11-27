@@ -1,5 +1,49 @@
 # progress
 
+## 2026-11-27 (session 21)
+- t04 MMU GREEN (53 fw checks) + FULL SUITE GREEN. Closed the session-20
+  handoff (found WIP: t04_mmu.c drafted, m2 walk-arbiter half-landed,
+  tb_fw with one-off T29/IMON debug hacks).
+- REAL RTL FIXES (both live bugs on the shared-m2 dual-walker path):
+  (1) TLB fill victim policy: raw min-stamp OVER ALL WAYS let a fill evict
+    a JUST-FILLED valid entry while the set had invalid ways: sfence keeps
+    stale stamps on invalidated ways; the 4-bit wrap made the newest entry
+    the numeric min (t04 chk42: asid1 fill clobbered the asid0 AL3 entry ->
+    re-walk -> pgD). FIX rtl/mmu.v fw1/fw2: INVALID way first (lowest
+    index), else min stamp among valid. design.md sec.7 + mmu.v header
+    updated to the actual policy (FIFO-within-set + invalid-first; hits do
+    NOT refresh stamps).
+  (2) m2 arbiter GRANT hole (WIP gated only S_IDLE starts): S_RESP 1-ahead
+    REQ accept entered S_W1S WITHOUT GRANT_I -> both walkers could STB m2
+    the same cycle -> lost/mis-routed PTE reads. FIX: S_RESP miss latches
+    ctx, steps to S_IDLE+pend iff !GRANT_I. Arbiter (core.v, WIP verified):
+    grant_d=!mmi_busy, grant_i=!mmd_want&&!mmd_busy (D-priority; BUSY=
+    st!=S_IDLE incl S_RESP; pend retries) -> at most one STB/cycle, no
+    lost req, no deadlock (walks never wait on the other walker).
+- tb_mmu M8 REWORKED (71 checks now): old "asid0 miss again" depended on
+  the buggy eviction luck (asid1 fill evicting the L2 asid0 entry). New M8:
+  sf_all start -> known capacity -> asserts asid0 first miss, asid1 same-VA
+  miss (keying), asid0 SURVIVES the asid1 fill, asid1 same-page alias hit,
+  0x2004 new-page miss per asid + asid0 hit. NOTE: 0x100C is NOT a new page
+  (same 4K page as 0x1004, tag VA[31:14]) -> second-page tests use 0x2004.
+- t04 chk51 TEST FIX (not RTL): mstatus.MIE==0 after mret is NOT spec -
+  mret does MIE<-MPIE and the MPRV-battery mret chain left MPIE=1 (priv
+  3.1.7: mret sets MPIE<-1). Assertion -> "no new M trap + MPP==U".
+  Harmless either way: mie/sie CSRs are 0 so interrupts stay masked.
+- tb_fw.v monitors generalized (permanent, plusarg-gated): +MMON (both-side
+  MMU REQ[hit,asid,satp,pc]/DONE[fault,cause]/fills[l1i,l2i,tag,asid,pa,
+  sz,g]/sfence), +TLBDUMP (all valid entries both TLBs both sides at end),
+  +BUSMON TRP/XRT lines carry mstatus now; full 32-GPR dump on fail;
+  deleted the hardcoded T29/IMON one-offs. Tools kept: tools/pa_word.py
+  (PA->DRAM word idx), tools/xcscan.py.
+- tb_fw check-count note: prints "ALL TESTS PASSED (1 checks)" - tb_fw
+  counts only the FW-pass marker; real check count = max chk() in the .c
+  (53 for t04).
+- suite: mmu(71) l1_i(28) l1_d(31) wb_ic(25) 16550(21) clint(36) plic(24)
+  core(54) c8(34) t01(378) t02(33) t03(61) t04(53) soc(16) ALL GREEN.
+- next: t05 (sec.10 E fw battery), dhrystone (F), C8-Sv32 on-core, synth
+  yosys->nextpnr-ecp5->ecppack, board lpf, README.
+
 ## 2026-11-26 (session 20)
 - t03 C PORT COMPLETE: session-19 HANDOFF closed. FULL suite green incl.
   t03 (61 fw checks): mmu 59, l1_i 28, l1_d 31, wb_ic 25, 16550 21,

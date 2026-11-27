@@ -32,7 +32,8 @@ module tb_mmu;
         .DONE_O(DONE), .PA_O(PAO), .FAULT_O(FAU), .CAUSE_O(CAU),
         .SF_I(SF), .SFASID_I(SFASID),
         .STB_O(STB), .SEL_O(), .ADR_O(ADRW), .WE_O(),
-        .ACK_I(ACKR), .DAT_I(DATO)
+        .ACK_I(ACKR), .DAT_I(DATO),
+        .GRANT_I(1'b1)   // single walker: always granted (no m2 contention)
     );
 
     always #10 clk = ~clk;
@@ -386,19 +387,43 @@ module tb_mmu;
         else
             err("M7: S load U=0 OK");
 
-        // ---- M8 ASID tagging: mismatch -> miss even on same VA
+        // ---- M8 ASID tagging: mismatch -> miss even on same VA.
+        // Starts with sf_all so set occupancy is known: all fills land in
+        // invalid ways (invalid-first), making the survival checks below
+        // deterministic (no dependence on stale-stamp eviction order).
+        sfence(2'b01, 9'd0, 32'h0);
+        mmu_req(32'h00001004, 2'd0, 2'd1, S_A0, 1'b0, 1'b0);
+        if (!q_fau && q_pa === 32'h00001004 && q_lat === 9'd5)
+            ok("M8: asid0 first miss");
+        else
+            err("M8: asid0 first miss");
         mmu_req(32'h00001004, 2'd0, 2'd1, S_A1, 1'b0, 1'b0);
         if (!q_fau && q_pa === 32'h00001004 && q_lat === 9'd5)
             ok("M8: asid1 miss refill");
         else
             err("M8: asid1 miss refill");
         mmu_req(32'h00001004, 2'd0, 2'd1, S_A0, 1'b0, 1'b0);
-        if (!q_fau && q_pa === 32'h00001004 && q_lat === 9'd5)
-            ok("M8: asid0 miss again");
+        if (!q_fau && q_pa === 32'h00001004 && q_lat === 9'd1)
+            ok("M8: asid0 survives");
         else
-            err("M8: asid0 miss again");
-        mmu_req(32'h0000100C, 2'd0, 2'd1, S_A0, 1'b0, 1'b0);
+            err("M8: asid0 survives");
+        mmu_req(32'h0000100C, 2'd0, 2'd1, S_A1, 1'b0, 1'b0);
         if (!q_fau && q_pa === 32'h0000100C && q_lat === 9'd1)
+            ok("M8: asid1 alias hit");
+        else
+            err("M8: asid1 alias hit");
+        mmu_req(32'h00002004, 2'd0, 2'd1, S_A0, 1'b0, 1'b0);
+        if (!q_fau && q_pa === 32'h00002004 && q_lat === 9'd5)
+            ok("M8: new page miss");
+        else
+            err("M8: new page miss");
+        mmu_req(32'h00002004, 2'd0, 2'd1, S_A1, 1'b0, 1'b0);
+        if (!q_fau && q_pa === 32'h00002004 && q_lat === 9'd5)
+            ok("M8: 2004 asid1 miss");
+        else
+            err("M8: 2004 asid1 miss");
+        mmu_req(32'h00002004, 2'd0, 2'd1, S_A0, 1'b0, 1'b0);
+        if (!q_fau && q_pa === 32'h00002004 && q_lat === 9'd1)
             ok("M8: asid0 hit");
         else
             err("M8: asid0 hit");

@@ -14,10 +14,10 @@ Reference models in tools/: mmu_addr.py (Sv32 walk), addr.py (WB decode),
 csr_list.py (CSR addresses), misa.py (misa reset).
 
 ## Already-tested blocks (interfaces fixed; core only consumes, do not re-derive)
-- **rtl/mmu.v** — Sv32 walker+TLB, WB RO master (SoC m2/m3, per-side). 67 checks.
+- **rtl/mmu.v** — Sv32 walker+TLB, WB RO master (SoC m2/m3, per-side). 71 checks.
   In : REQ, VA, ACC[1:0] (0=fetch 1=load 2=store 3=amo), MODE[1:0] (0=M 1=S 2=U),
-        SUM, MXR, SATP, SF[1:0], SFASID
-  Out: DONE, PA, FAULT, CAUSE[3:0] (12/13/15)
+        SUM, MXR, SATP, SF[1:0], SFASID, GRANT_I (m2 walk-start grant)
+  Out: DONE, PA, FAULT, CAUSE[3:0] (12/13/15), BUSY (walking), WANT (miss wants walk)
   Latency from REQ: hit 1 cyc; 4M miss 3; 4K miss 5 (1-cyc slave).
   1-AHEAD: REQ may be asserted during the prior DONE cycle -> sustained
   1 translation/cyc on hits. IF must pipeline PC and hold the in-flight VA

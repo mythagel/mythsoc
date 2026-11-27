@@ -194,8 +194,13 @@ MMU (Sv32; spec 12.3, satp 12.1.11; addresses verified by tools/mmu_addr.py):
     Entry: v,g,sz,asid[8:0],tagva,pa[31:12] (4M: only upper 10b PA[31:22] used;
     PA[21:12] taken from VA),r,w,x,u,a,d; LRU 4b stamp (global 4b counter).
     4K pa[31:0] = {pa12, va[11:0]}; 4M pa[31:0] = {pa12[19:10], va[21:0]}.
-    Walk done -> fill L1+L2 of the REQUESTING side (single serialized walk unit;
-    I-side walk stalls IF, D-side stalls MA).
+    Walk done -> fill L1+L2 of the REQUESTING side. Fill way: INVALID way
+    first (lowest index), else min stamp (4-bit global fill counter; hits do
+    NOT refresh -> FIFO within a set; invalid-first prevents stale-stamp
+    wrap evictions -- t04 chk42). I-side walk stalls IF, D-side stalls MA;
+    the two walkers share WB port m2 via a core grant handshake
+    (GRANT_I/WANT_O/BUSY_O, D-priority): an ungranted walk-start latches
+    (pend) in the mmu -> at most one STB on m2 any cycle.
     satp write: no auto-flush (SFENCE.VMA does it). sf_all (rs1=rs2=0),
     sf_asid (rs2!=0; G entries survive asid flush, killed by sf_all).
   Page sizes: 4K / 4M only (Sv32 LEVELS=2; no 1G in Sv32).
@@ -271,10 +276,10 @@ F. Perf: Dhrystone (embedded) cycle count -> DMIPS/MHz via TB cycle count;
 - [x] clint + tb
 - [x] plic + tb
 - [x] wb_ic + tb (with WB slave models)
-- [x] mmu + tb (walker + TLB, with WB ram): 59 checks M1-M12 all pass
+- [x] mmu + tb (walker + TLB, with WB ram): 71 checks M1-M12 all pass
 - [x] l1_i + tb (23 checks I1-I10) and l1_d + tb (20 checks D1-D10)
 - [x] mmu.v fully pipelined: hit 1 / 4M 3 / 4K 5 + 1-ahead (sustained 1/cyc);
-      tb +M13 (67 checks)
+      tb +M13 +invalid-first fill +m2 GRANT handshake (71 checks total)
 - [x] l1_i & l1_d fully pipelined: verified sustained 1.0 hit/cyc (DONE pulses
       in IDLE; no change needed); tb +I11 (28), +D11 (24)
 - [ ] core + tb (plan: notes/core.md)
@@ -296,8 +301,9 @@ F. Perf: Dhrystone (embedded) cycle count -> DMIPS/MHz via TB cycle count;
       tb/tb_fw.v + scripts/fw_asm.sh + regress.sh:
       A: t01_isa.S GENERATED (tools/isa_gen.py) 378 checks GREEN;
       B: t02_traps.S 33 checks GREEN (T9 = CSR-forward d=1/d=2 regression);
-      C: t03_intr.S pending; D: t04_mmu.S pending; E: t05_soc.S pending;
-      F: dhrystone pending
+      C: t03_intr.c 61 checks GREEN; D: t04_mmu.c 53 checks GREEN (Sv32 on
+      SoC: MPRV/perm/A-D/U/SUM/MXR/4M-alias/sfence-classes/asid/satp);
+      E: t05_soc.S pending; F: dhrystone pending
 - [ ] full suite green
 - [ ] yosys synth + nextpnr + ecppack (bitstream) + fmax report
 - [ ] board lpf + openocd + boot stub (BRAM)

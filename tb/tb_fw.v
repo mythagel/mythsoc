@@ -50,6 +50,74 @@ module tb_fw;
         end
     endtask
 
+    // final GPR / save-area forensics. rf is the core regfile; sav_s/g_abort
+    // indices are for the CURRENT t04 build (tools/pa_word.py) -- best-effort.
+    integer rgv;
+    task regdump();
+        begin
+            for (rgv = 0; rgv < 32; rgv = rgv + 1) begin
+                $write("  x%0d=%h", rgv, dut.core0.rf[rgv]);
+                if (rgv % 4 == 3) $display("");
+            end
+            $display("");
+            for (rgv = 0; rgv < 16; rgv = rgv + 1)
+                $display("  sav_s[%0d]=%h", rgv, dut.s1ram.mem[1024 + rgv]);
+            $display("  g_abort=%h", dut.s1ram.mem[15360]);
+        end
+    endtask
+
+    // +MMON: MMU transaction trace, both sides (I + D walkers): every REQ
+    // (VA page, acc, mode, current asid, TLB hit bit), every DONE (PA/fault/
+    // cause), TLB fills (L1/L2 index, tag, asid, PA), sfence commits. The hit
+    // bit + fill log settles TLB/asid/eviction questions without guessing.
+    initial begin
+        if ($test$plusargs("MMON")) begin
+            forever begin
+                @(negedge clk);
+                if (!rst) begin
+                    if (dut.core0.req_mmu)
+                        $display("MI-R %h a%0d m%0d as%0d satp=%h hit=%b",
+                                 dut.core0.mmu_i.VA_I[31:12],
+                                 dut.core0.mmu_i.ACC_I, dut.core0.mmu_i.MODE_I,
+                                 dut.core0.mmu_i.SATP_I[30:22],
+                                 dut.core0.mmu_i.SATP_I, dut.core0.mmu_i.h_hit);
+                    if (dut.core0.mmu_i.DONE_O)
+                        $display("MI-D %h fau=%b c%0d fpc=%h",
+                                 dut.core0.mmu_i.PA_O,
+                                 dut.core0.mmu_i.FAULT_O,
+                                 dut.core0.mmu_i.CAUSE_O, dut.core0.fpc);
+                    if (dut.core0.req_md)
+                        $display("MD-R %h a%0d m%0d as%0d satp=%h hit=%b pc=%h",
+                                 dut.core0.mmu_d.VA_I[31:12],
+                                 dut.core0.mmu_d.ACC_I, dut.core0.mmu_d.MODE_I,
+                                 dut.core0.mmu_d.SATP_I[30:22],
+                                 dut.core0.mmu_d.SATP_I, dut.core0.mmu_d.h_hit,
+                                 dut.core0.idex_pc);
+                    if (dut.core0.mmu_d.DONE_O)
+                        $display("MD-D %h fau=%b c%0d",
+                                 dut.core0.mmu_d.PA_O,
+                                 dut.core0.mmu_d.FAULT_O,
+                                 dut.core0.mmu_d.CAUSE_O);
+                    if (dut.core0.mmu_i.do_fill)
+                        $display("MFI l1i=%0d l2i=%0d tag=%h as=%0d pa=%h sz=%b g=%b",
+                                 dut.core0.mmu_i.fe1, dut.core0.mmu_i.fe2,
+                                 dut.core0.mmu_i.f1t, dut.core0.mmu_i.asid_r,
+                                 dut.core0.mmu_i.pa_i[31:12],
+                                 dut.core0.mmu_i.frm_eff, dut.core0.mmu_i.pi_g);
+                    if (dut.core0.mmu_d.do_fill)
+                        $display("MFD l1i=%0d l2i=%0d tag=%h as=%0d pa=%h sz=%b g=%b",
+                                 dut.core0.mmu_d.fe1, dut.core0.mmu_d.fe2,
+                                 dut.core0.mmu_d.f1t, dut.core0.mmu_d.asid_r,
+                                 dut.core0.mmu_d.pa_i[31:12],
+                                 dut.core0.mmu_d.frm_eff, dut.core0.mmu_d.pi_g);
+                    if (dut.core0.sf_now)
+                        $display("SF cls=%0d fpc=%h", dut.core0.sf_typ,
+                                 dut.core0.fpc);
+                end
+            end
+        end
+    end
+
     // heartbeat (diagnostics): +HB prints core state every 2000 cycles
     integer hbn;
     initial begin
@@ -85,6 +153,116 @@ module tb_fw;
             end
         end
     end
+
+    // X-catcher: 64-deep ring of fetch-engine control state; the first cycle
+    // any key control signal is X triggers a full oldest->newest dump.
+    localparam XR = 64;
+    integer xk, xi, xn;
+    reg xcaught;
+    reg [31:0] xfpc [0:XR-1], xrpc [0:XR-1];
+    reg [63:0] x_mio, x_pav, x_pf, x_lio, x_dmio, x_dlio, x_rmu, x_rl1, x_syn2;
+    reg [63:0] x_flush, x_stall, x_mdone, x_mfault, x_ldone, x_sfn, x_sfh;
+    reg [63:0] x_priv, x_trap, x_xret, x_redir, x_fqc2;
+    reg [2:0]  x_mst [0:XR-1];
+    reg [1:0]  x_lst [0:XR-1];
+    initial begin
+        xcaught = 1'b0; xk = 0;
+        forever begin
+            @(negedge clk);
+            if (rst) begin
+                xk = xk + 1;
+            end else if (!xcaught) begin
+                xfpc[xk % XR]     = dut.core0.fpc;
+                xrpc[xk % XR]     = dut.core0.redirect_pc;
+                x_mio  [xk % XR]  = dut.core0.mio;
+                x_pav  [xk % XR]  = dut.core0.pav;
+                x_pf   [xk % XR]  = dut.core0.pav_f;
+                x_lio  [xk % XR]  = dut.core0.lio;
+                x_dmio [xk % XR]  = dut.core0.d_mio;
+                x_dlio [xk % XR]  = dut.core0.d_lio;
+                x_rmu  [xk % XR]  = dut.core0.req_mmu;
+                x_rl1  [xk % XR]  = dut.core0.req_l1;
+                x_syn2 [xk % XR]  = dut.core0.syn;
+                x_flush[xk % XR]  = dut.core0.flush;
+                x_stall[xk % XR]  = dut.core0.stall;
+                x_mdone[xk % XR]  = dut.core0.mmu_done;
+                x_mfault[xk % XR] = dut.core0.mmu_fault;
+                x_ldone[xk % XR]  = dut.core0.l1_done;
+                x_sfn  [xk % XR]  = dut.core0.sf_now;
+                x_sfh  [xk % XR]  = dut.core0.sf_h;
+                x_priv [xk % XR]  = dut.core0.priv;
+                x_trap [xk % XR]  = dut.core0.ma_trap;
+                x_xret [xk % XR]  = dut.core0.ma_xret;
+                x_redir[xk % XR]  = dut.core0.redirect;
+                x_fqc2 [xk % XR]  = |dut.core0.fq_c;
+                x_mst  [xk % XR]  = dut.core0.mmu_i.st;
+                x_lst  [xk % XR]  = dut.core0.l1i.st;
+                if (dut.core0.mio === 1'bx || dut.core0.pav === 1'bx ||
+                    dut.core0.lio === 1'bx || dut.core0.req_mmu === 1'bx ||
+                    dut.core0.mmu_done === 1'bx || dut.core0.l1_done === 1'bx ||
+                    dut.core0.sf_now === 1'bx || dut.core0.mmu_i.st === 3'bx ||
+                    dut.core0.l1i.st === 2'bx || dut.core0.fq_c === 3'bx ||
+                    dut.core0.flush === 1'bx || dut.core0.stall === 1'bx ||
+                    dut.core0.ma_xret === 1'bx || dut.core0.ma_trap === 1'bx) begin
+                    xcaught = 1'b1;
+                    $display("XCATCH first-X at negedge %0d", xk);
+                    for (xi = 0; xi < XR; xi = xi + 1) begin
+                        xn = (xk + 1 + xi) % XR;   // oldest-first ring walk
+                        $display("XC %0d fpc=%h mio=%b pav=%b pf=%b lio=%b dmio=%b dlio=%b rmu=%b rl1=%b syn=%b fl=%b st=%b md=%b mf=%b ld=%b sfn=%b sfh=%b priv=%b tr=%b xr=%b rd=%b rpc=%h fq=%b mst=%b lst=%b",
+                                 xn, xfpc[xn], x_mio[xn], x_pav[xn], x_pf[xn], x_lio[xn],
+                                 x_dmio[xn], x_dlio[xn], x_rmu[xn], x_rl1[xn], x_syn2[xn],
+                                 x_flush[xn], x_stall[xn], x_mdone[xn], x_mfault[xn],
+                                 x_ldone[xn], x_sfn[xn], x_sfh[xn], x_priv[xn],
+                                 x_trap[xn], x_xret[xn], x_redir[xn], xrpc[xn],
+                                 x_fqc2[xn], x_mst[xn], x_lst[xn]);
+                    end
+                end
+                xk = xk + 1;
+            end
+        end
+    end
+
+    // +TLBDUMP: full valid-entry dump of both TLBs (both sides) at the moment
+    // the run ends (marker seen) -- pair with +MMON's hit/fill log.
+    integer td1, td2;
+    task tlbdump(input [255:0] side);
+        begin
+            for (td1 = 0; td1 < 16; td1 = td1 + 1)
+                if (side == "I" ? dut.core0.mmu_i.l1_v[td1]
+                                : dut.core0.mmu_d.l1_v[td1])
+                    $display("  %0s-L1 %0d tag=%h sz=%b g=%b as=%0d pa=%h st=%0d",
+                             side, td1,
+                             side == "I" ? dut.core0.mmu_i.l1_tag[td1]
+                                         : dut.core0.mmu_d.l1_tag[td1],
+                             side == "I" ? dut.core0.mmu_i.l1_sz[td1]
+                                         : dut.core0.mmu_d.l1_sz[td1],
+                             side == "I" ? dut.core0.mmu_i.l1_g[td1]
+                                         : dut.core0.mmu_d.l1_g[td1],
+                             side == "I" ? dut.core0.mmu_i.l1_asid[td1]
+                                         : dut.core0.mmu_d.l1_asid[td1],
+                             side == "I" ? dut.core0.mmu_i.l1_pa12[td1]
+                                         : dut.core0.mmu_d.l1_pa12[td1],
+                             side == "I" ? dut.core0.mmu_i.l1_st[td1]
+                                         : dut.core0.mmu_d.l1_st[td1]);
+            for (td2 = 0; td2 < 256; td2 = td2 + 1)
+                if (side == "I" ? dut.core0.mmu_i.l2_v[td2]
+                                : dut.core0.mmu_d.l2_v[td2])
+                    $display("  %0s-L2 %0d tag=%h sz=%b g=%b as=%0d pa=%h st=%0d",
+                             side, td2,
+                             side == "I" ? dut.core0.mmu_i.l2_tag[td2]
+                                         : dut.core0.mmu_d.l2_tag[td2],
+                             side == "I" ? dut.core0.mmu_i.l2_sz[td2]
+                                         : dut.core0.mmu_d.l2_sz[td2],
+                             side == "I" ? dut.core0.mmu_i.l2_g[td2]
+                                         : dut.core0.mmu_d.l2_g[td2],
+                             side == "I" ? dut.core0.mmu_i.l2_asid[td2]
+                                         : dut.core0.mmu_d.l2_asid[td2],
+                             side == "I" ? dut.core0.mmu_i.l2_pa12[td2]
+                                         : dut.core0.mmu_d.l2_pa12[td2],
+                             side == "I" ? dut.core0.mmu_i.l2_st[td2]
+                                         : dut.core0.mmu_d.l2_st[td2]);
+        end
+    endtask
 
     // +TRACE: per-interrupt-handler-entry trace (t03 forensics).
     // Handler writes m_hist_n (DRAM word 20) / s_hist_n (word 101) AFTER
@@ -223,14 +401,15 @@ module tb_fw;
                              dut.s3clint.mtime[31:0], dut.s3clint.ADR_I[15:0],
                              dut.core0.fpc, dut.core0.priv);
                 if (dut.core0.ma_trap)
-                    $display("TRP t=%h to_s=%b cause=%h tval=%h priv=%b",
+                    $display("TRP t=%h to_s=%b cause=%h tval=%h priv=%b ms=%h",
                              dut.s3clint.mtime[31:0], dut.core0.trap_to_s,
                              dut.core0.trap_cause, dut.core0.trap_tval,
-                             dut.core0.priv);
+                             dut.core0.priv, dut.core0.mstatus);
                 if (dut.core0.ma_xret)
-                    $display("XRT t=%h mret=%b pc=%h priv=%b",
+                    $display("XRT t=%h mret=%b pc=%h priv=%b ms=%h",
                              dut.s3clint.mtime[31:0], dut.core0.ma_mret,
-                             dut.core0.xret_pc, dut.core0.priv);
+                             dut.core0.xret_pc, dut.core0.priv,
+                             dut.core0.mstatus);
                 for (bmw = 16; bmw <= 20; bmw = bmw + 1)
                     if (dut.s1ram.mem[bmw] !== bm_old[bmw]) begin
                         $display("RW  t=%h w=%0d v=%h fpc=%h priv=%b",
@@ -306,6 +485,10 @@ module tb_fw;
                      dut.core0.mcause, dut.core0.mepc, dut.core0.priv);
             int_state();
             dram_dump();
+            regdump();
+            if ($test$plusargs("TLBDUMP")) begin
+                tlbdump("I"); tlbdump("D");
+            end
             $finish;
         end
         if (dut.s1ram.mem[0] === 32'h0) begin ok("FW-pass"); end
@@ -316,6 +499,10 @@ module tb_fw;
                      dut.core0.priv);
             int_state();
             dram_dump();
+            regdump();
+            if ($test$plusargs("TLBDUMP")) begin
+                tlbdump("I"); tlbdump("D");
+            end
         end
         if ($test$plusargs("DUMP")) dram_dump();
         if (errors == 0) $display("ALL TESTS PASSED (%0d checks)", passes);

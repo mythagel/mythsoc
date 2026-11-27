@@ -38,8 +38,15 @@
 //                              4M: set VA[22:20] tag VA[31:22]
 //   entry: v tag sz g asid[8:0] pa12=PA[31:12] r w x u a d
 //   match: entry.g==1 || entry.asid==satp.asid (asid = SATP_I[30:22])
+//   GRANT_I/WANT_O/BUSY_O: walk-start handshake with the core's m2 arbiter
+//     (two instances share one WB read port): a miss without grant latches
+//     its context (pend) in S_IDLE (or steps back from S_RESP) and starts
+//     when granted -> at most one walker ever presents STB on m2.
 //   fill (walk structurally OK, even if this access faults): L1+L2, way =
-//     min stamp, stamp = global 4-bit LRU counter.
+//     INVALID way first (lowest index), else min stamp; stamp = global 4-bit
+//     fill counter (FIFO within sets; hits do not refresh). Invalid-first is
+//     required: invalidated ways keep stale stamps, and raw min-stamp across
+//     a 4-bit wrap would evict just-filled valid entries (t04 chk42).
 //   PA on hit: 4K {pa12, VA[11:0]}; 4M {pa12[11:2], VA[21:0]}
 // sfence.vma: SF_I: 00=none 01=all 10=asid (SFASID_I) 11=page(VA_I);
 //   page-granular over-flush (spec-safe). A sfence that arrives mid-walk is
@@ -61,7 +68,10 @@ module mmu (
     input  [1:0]  MODE_I,   // 0=M 1=S 2=U
     input        SUM_I, MXR_I,
     input  [31:0] SATP_I,   // MODE[31] ASID[30:22] PPN[21:0]
+    input        GRANT_I,   // walk-start grant (core m2 arbiter); hold until 1
     output       DONE_O,
+    output       BUSY_O,    // 1 while in a walk (st != S_IDLE): m2 held
+    output       WANT_O,    // 1 while wanting to start a walk (S_IDLE + miss/pend)
     output reg [31:0] PA_O,
     output reg   FAULT_O,
     output reg [3:0] CAUSE_O,
@@ -104,6 +114,7 @@ module mmu (
                S_W2S = 3'd3, S_W2W = 3'd4, S_RESP = 3'd5;
     reg [2:0] st;
     reg [31:0] va_r, satp_r, pte0a_r;
+    reg        pend;          // miss latched, awaiting GRANT_I (m2 arbiter)
     reg  [1:0]  acc_r, mode_r;
     reg        sum_r, mxr_r;
     reg  [8:0]  asid_r;
@@ -212,6 +223,16 @@ module mmu (
     wire        sfault = chk_fault(ACC_I, MODE_I, h_r, h_w, h_x, h_u, h_a, h_d,
                                    SUM_I, MXR_I);
     wire        mbare = !SATP_I[31] || MODE_I == 2'd0;
+
+    // m2-arbiter handshake (core: two MMU walkers share the m2 read port).
+    // BUSY_O: holding a walk / an m2 read is outstanding (must not preempt).
+    // WANT_O: wants to start a walk now (fresh miss or a held/pend miss).
+    // The core grants walk-starts so at most one walker is BUSY at a time;
+    // a walker holds in S_IDLE (pend) until GRANT_I, so its latched miss is
+    // not lost and its STB never collides with the other walker's on m2.
+    assign BUSY_O = (st != S_IDLE);
+    assign WANT_O = (st == S_IDLE) &&
+                    (pend || (REQ_I && !mbare && !h_hit));
     wire [3:0]  cause_req = (ACC_I == 2'd0) ? 4'd12 :
                              (ACC_I == 2'd1) ? 4'd13 : 4'd15;
 
@@ -264,21 +285,37 @@ module mmu (
     wire [4:0]  f2s = frm_eff ? {2'b00, va_r[22:20]} : va_r[16:12];
     wire [17:0] f1t = frm_eff ? {8'b0, va_r[31:22]} : va_r[31:14];
     wire [14:0] f2t = frm_eff ? {5'b0, va_r[31:22]} : va_r[31:17];
+    // victim way: an INVALID way first (lowest index), else min stamp. Stale
+    // stamps on invalidated ways must never make a fill evict a VALID entry
+    // while the set has spare capacity (raw min-stamp alone mis-picks when
+    // the 4-bit counter wraps vs pre-sfence stamps -- found by t04 chk42).
     reg  [1:0]  fw1;
+    reg         iv1;
     integer     k1;
     always @(*) begin
-        fw1 = 2'd0;
-        for (k1 = 1; k1 < 4; k1 = k1 + 1)
-            if (l1_st[{f1s, 2'b00} + k1] < l1_st[{f1s, 2'b00} + 2'd0])
-                fw1 = k1[1:0];
+        fw1 = 2'd0; iv1 = 1'b0;
+        for (k1 = 0; k1 < 4; k1 = k1 + 1)
+            if (!iv1 && !l1_v[{f1s, 2'b00} + k1]) begin
+                iv1 = 1'b1; fw1 = k1[1:0];
+            end
+        if (!iv1)
+            for (k1 = 1; k1 < 4; k1 = k1 + 1)
+                if (l1_st[{f1s, 2'b00} + k1] < l1_st[{f1s, 2'b00} + 2'd0])
+                    fw1 = k1[1:0];
     end
     reg  [2:0]  fw2;
+    reg         iv2;
     integer     k2;
     always @(*) begin
-        fw2 = 3'd0;
-        for (k2 = 1; k2 < 8; k2 = k2 + 1)
-            if (l2_st[{f2s, 3'b000} + k2] < l2_st[{f2s, 3'b000} + 2'd0])
-                fw2 = k2[2:0];
+        fw2 = 3'd0; iv2 = 1'b0;
+        for (k2 = 0; k2 < 8; k2 = k2 + 1)
+            if (!iv2 && !l2_v[{f2s, 3'b000} + k2]) begin
+                iv2 = 1'b1; fw2 = k2[2:0];
+            end
+        if (!iv2)
+            for (k2 = 1; k2 < 8; k2 = k2 + 1)
+                if (l2_st[{f2s, 3'b000} + k2] < l2_st[{f2s, 3'b000} + 2'd0])
+                    fw2 = k2[2:0];
     end
     wire [3:0] fe1 = {f1s, fw1};
     wire [7:0] fe2 = {f2s, fw2};
@@ -311,6 +348,7 @@ module mmu (
             FAULT_O <= 1'b0;
             CAUSE_O <= 4'h0;
             sf_p <= 1'b0;
+            pend <= 1'b0;
             lru <= 4'd0;
             for (i = 0; i < 16; i = i + 1)
                 l1_v[i] <= 1'b0;
@@ -329,7 +367,10 @@ module mmu (
 
             case (st)
             S_IDLE: begin
-                if (REQ_I) begin
+                if (pend) begin
+                    // held miss awaiting the m2-arbiter grant; start once granted
+                    if (GRANT_I) begin st <= S_W1S; pend <= 1'b0; end
+                end else if (REQ_I) begin
                     if (mbare) begin
                         PA_O <= VA_I; FAULT_O <= 1'b0; CAUSE_O <= 4'h0;
                         st <= S_RESP;
@@ -341,7 +382,8 @@ module mmu (
                         sum_r <= SUM_I;
                         mxr_r <= MXR_I;
                         asid_r <= SATP_I[30:22];
-                        st <= S_W1S;
+                        if (GRANT_I) begin st <= S_W1S; pend <= 1'b0; end
+                        else pend <= 1'b1;
                     end else begin
                         PA_O <= pa_hit; FAULT_O <= sfault;
                         CAUSE_O <= cause_req;
@@ -381,7 +423,11 @@ module mmu (
                         sum_r <= SUM_I;
                         mxr_r <= MXR_I;
                         asid_r <= SATP_I[30:22];
-                        st <= S_W1S;
+                        // GRANT_I must be honored here too (m2 arbiter):
+                        // entering S_W1S un-granted would collide this
+                        // walker's STB with the other walker's m2 read.
+                        if (GRANT_I) st <= S_W1S;
+                        else begin st <= S_IDLE; pend <= 1'b1; end
                     end else begin
                         PA_O <= pa_hit; FAULT_O <= sfault;
                         CAUSE_O <= cause_req;

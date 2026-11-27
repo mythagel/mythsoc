@@ -212,6 +212,10 @@ module core (
 
     // ------------------------------------------------------------ sub-blocks
     // I-side MMU: fetch (ACC=0), M-mode, satp=0 -> identity, no fault.
+    // m2 walk-arbiter: the two MMU walkers share the m2 read port, so their
+    // walk-starts are serialized (D-side priority). grant_* let a walker
+    // hold its latched miss (pend) until the other walker releases m2.
+    wire        grant_i, grant_d, mmi_want, mmd_want, mmi_busy, mmd_busy;
     wire       mmi_stb, mmi_we;
     wire [3:0] mmi_sel;
     wire [31:0] mmi_adr;
@@ -224,7 +228,8 @@ module core (
         .FAULT_O(mmu_fault), .CAUSE_O(mmu_cause),
         .SF_I(sf_now ? sf_typ : 2'b00), .SFASID_I(exma_d[8:0]),
         .STB_O(mmi_stb), .SEL_O(mmi_sel), .ADR_O(mmi_adr), .WE_O(mmi_we),
-        .ACK_I(m2_ack), .DAT_I(m2_dat)
+        .ACK_I(m2_ack), .DAT_I(m2_dat),
+        .GRANT_I(grant_i), .WANT_O(mmi_want), .BUSY_O(mmi_busy)
     );
 
     // C4 nets (defined in the MA section; declared early for instances)
@@ -248,7 +253,8 @@ module core (
         .FAULT_O(mmd_fault), .CAUSE_O(mmd_cause),
         .SF_I(sf_now ? sf_typ : 2'b00), .SFASID_I(exma_d[8:0]),
         .STB_O(mmd_stb), .SEL_O(mmd_sel), .ADR_O(mmd_adr), .WE_O(mmd_we),
-        .ACK_I(m2_ack), .DAT_I(m2_dat)
+        .ACK_I(m2_ack), .DAT_I(m2_dat),
+        .GRANT_I(grant_d), .WANT_O(mmd_want), .BUSY_O(mmd_busy)
     );
 
     // m2 arbiter: both MMU walkers are WB-RO; D-side priority, grant follows
@@ -257,6 +263,17 @@ module core (
     assign m2_sel = 4'b1111;
     assign m2_we  = 1'b0;
     assign m2_adr = mmd_stb ? mmd_adr : mmi_adr;
+
+    // m2 walk-arbiter GRANTS: serialize the two walkers (D-side priority) so
+    // m2 has at most ONE outstanding read at a time; the shared m2_ack/m2_dat
+    // then carry exactly the presenting walker's PTE (no cross-latch).
+    //   grant_d: D may start a walk iff I is not already in one (busy).
+    //   grant_i: I may start a walk iff D is not wanting one this cycle AND D
+    //             is not in one (D-priority: if both want, D goes, I pends).
+    // A denied walker holds its latched miss (pend) and retries, so no
+    // request is lost and no two walkers present STB on m2 concurrently.
+    assign grant_d = !mmi_busy;
+    assign grant_i = !mmd_want && !mmd_busy;
 
     // I-cache: 1-AHEAD requests on consecutive cycles are legal on hits.
     l1_i l1i (
