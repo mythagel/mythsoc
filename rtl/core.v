@@ -107,15 +107,21 @@ module core (
     wire [31:0] exma_target;
     // C5: MA trap / xret also redirect (and flush younger + fetch residue)
     wire        ma_trap, ma_xret, ma_mret, int_fire, int_to_s;
+    wire        fi_now;                   // fence.i commit pulse (see MA)
+    wire        inval_go;                 // fence.i or xret committing now
     wire [31:0] trap_pc, xret_pc, trap_cause, trap_tval;
     wire        trap_to_s;
     wire        branch_committed = exma_v && exma_jbr && exma_taken;
-    wire        redirect = branch_committed || ma_trap || ma_xret || int_fire;
+    // fence.i: self-redirect to pc+4 reuses the full flush machinery (kill
+    // younger + drain fetch FIFO + discard in-flight fetch responses).
+    wire        redirect = branch_committed || ma_trap || ma_xret || int_fire
+                         || fi_now;
     wire        flush = redirect;
     wire [31:0] trap_pc_i = int_to_s ? {stvec[31:2], 2'b00} : {mtvec[31:2], 2'b00};
     wire [31:0] redirect_pc = ma_trap ? trap_pc
                               : ma_xret ? xret_pc
                               : branch_committed ? exma_target
+                              : fi_now ? (exma_pc + 32'd4)
                               : trap_pc_i;
 
     // ------------------------------------------------------------ fetch (IF)
@@ -126,6 +132,7 @@ module core (
     reg         lio;          // l1_i req in flight / DONE not consumed
     reg         d_mio;        // discard next mmu DONE (post-redirect residue)
     reg         d_lio;        // discard next l1 DONE (post-redirect residue)
+    reg         inval_p;      // fence.i/mret/sret: I$ INVAL held until idle
     reg  [31:0] pc_mmu;       // VA of the mmu request awaiting DONE
     reg  [31:0] pc_pav;       // VA matching the held PA_O
     reg  [31:0] pc_l1;        // VA of the l1_i request in flight
@@ -163,8 +170,19 @@ module core (
     wire [2:0] fq_c_next = fq_c + (enq ? 3'd1 : 3'd0) - (deq ? 3'd1 : 3'd0);
     wire l1_free  = !lio || (l1_done && !stall); // 1-AHEAD needs slot + no stall
     wire space    = (fq_c_next + (lio && !l1_done ? 3'd1 : 3'd0)) <= 3'd3;
-    wire req_l1   = !flush && !syn && t_pa_v && l1_free && space;
-    wire req_mmu  = !flush && !sf_now && !sf_h && !pav && (!mio || (fresh_mmu && l1_free && space));
+    // while an I$ INVAL is pending, do not issue REQ (l1_i applies INVAL only
+    // at W_IDLE without a same-cycle REQ; a REQ there could hit a line that
+    // the pending invalidate must kill first).
+    wire req_l1   = !flush && !syn && t_pa_v && l1_free && space && !inval_p;
+    // NB (t05): !inval_p gates req_mmu TOO. The pav 1-ahead scheme requires a
+    // fresh response to be consumed by req_l1 on its arrival edge. With req_l1
+    // held (INVAL pending) an ungated req_mmu issues the NEXT translation
+    // behind an unconsumed held pav; the next fresh response then overwrites
+    // pc_pav (orphaning the held VA: instruction skipped) while pc_l1 takes
+    // the STALE pc_pav (-> {pc,data} mispair). fence.i/mret held INVAL =>
+    // fetch must pause, not half-run.
+    wire req_mmu  = !flush && !sf_now && !sf_h && !pav && !inval_p
+                    && (!mio || (fresh_mmu && l1_free && space));
 
     always @(posedge clk or posedge rst) begin
         if (rst) begin
@@ -173,6 +191,7 @@ module core (
             pav    <= 1'b0;
             pav_f  <= 1'b0;
             lio    <= 1'b0;
+            inval_p<= 1'b0;
             d_mio  <= 1'b0;
             d_lio  <= 1'b0;
             fq_w   <= 3'd0;
@@ -191,6 +210,11 @@ module core (
                                                    : (pav || fresh_mmu));
             if (fresh_mmu && !((req_l1 || syn) && !pav)) pav_f <= mmu_fault;
             lio <= req_l1 ? 1'b1 : (l1_done ? 1'b0 : lio);
+            // INVAL hold: asserted from the commit cycle until one cycle in
+            // which l1_i is idle (lio=0 -> st==W_IDLE) -- the held INVAL_I is
+            // applied there and released at the same edge. In-flight refills
+            // (which may carry pre-fence data) land first, then all die.
+            inval_p <= inval_go ? 1'b1 : (!lio ? 1'b0 : inval_p);
             d_mio <= (d_mio || (flush && mio)) && !mmu_done;
             d_lio <= (d_lio || (flush && lio)) && !l1_done;
             if (enq) begin
@@ -278,7 +302,7 @@ module core (
     // I-cache: 1-AHEAD requests on consecutive cycles are legal on hits.
     l1_i l1i (
         .clk(clk), .rst(rst),
-        .REQ_I(req_l1), .PA_I(mmu_pa), .INVAL_I(1'b0),
+        .REQ_I(req_l1), .PA_I(mmu_pa), .INVAL_I(inval_p),
         .DONE_O(l1_done), .DATA_O(l1_data),
         .STB_O(m0_stb), .SEL_O(m0_sel), .ADR_O(m0_adr), .WE_O(m0_we),
         .ACK_I(m0_ack), .DAT_I(m0_dat)
@@ -323,6 +347,7 @@ module core (
     reg  [2:0]  idex_wd3;
     reg  [31:0] idex_d;
     reg         idex_csr, idex_sys, idex_legal;
+    reg         idex_fi;          // fence.i flag pipelined to MA
     reg         idex_pf;
     reg  [31:0] idex_instr, idex_addr;
     reg  [31:0] idex_pc, idex_a, idex_b, idex_off, idex_c;
@@ -335,6 +360,7 @@ module core (
     reg  [2:0]  exma_wd3_q;
     reg  [31:0] exma_pa_q, exma_d_q;
     reg         exma_csr_q, exma_sys_q, exma_legal_q;
+    reg         exma_fi_q;
     reg         exma_pf_q, exma_df_q;
     reg  [3:0]  exma_dfc_q;
     reg  [31:0] exma_instr_q, exma_addr_q;
@@ -349,6 +375,8 @@ module core (
     assign exma_taken = exma_taken_q;
     assign exma_target = exma_target_q;
     wire        exma_csr, exma_sys, exma_legal, exma_pf, exma_df;
+    wire        exma_fi;
+    assign exma_fi = exma_fi_q;
     wire [3:0]  exma_dfc;
     wire [31:0] exma_instr, exma_addr;
     assign exma_pf  = exma_pf_q;
@@ -391,6 +419,12 @@ module core (
     wire is_br    = (op == 7'h63);
     wire is_jal   = (op == 7'h6F);
     wire is_jalr  = (op == 7'h67);
+    // FENCE opcode (7'h0F): f3=000 FENCE (I/O ordering NOP -- single in-order
+    // hart, write-through D$: RVWMO order is inherent), f3=001 FENCE.I
+    // (Zifencei: I$ invalidate + fetch redirect, see MA). f3=010..111 =
+    // reserved -> illegal (unpriv spec Ch.5 / FENCE table encoding).
+    wire is_fence = (op == 7'h0F);
+    wire fnd_ok   = (f3 == 3'b000) || (f3 == 3'b001);
     // C5 legality table: bad sub-encodings (funct7/funct3/rs2 combos) trap.
     wire alu7_ok  = (f7 == 7'h00) || (f7 == 7'h20) || (f7 == 7'h01);
     wire op7_ok   = (f7 == 7'h00) || ((f7 == 7'h20) && ((f3 == 3'b000) || (f3 == 3'b101)))
@@ -414,7 +448,8 @@ module core (
                     || sys_sfence || sys_sret || sys_mret;
     wire legal      = (is_op & op7_ok) | (is_opimm & opimm_ok) | is_lui | is_auipc
                     | (is_br & br_ok) | is_jal | (is_jalr & jr_ok)
-                    | (is_load & ld_ok) | (is_store & st_ok) | (is_sys & sys_ok);
+                    | (is_load & ld_ok) | (is_store & st_ok) | (is_sys & sys_ok)
+                    | (is_fence & fnd_ok);
 
     reg        c_wr;
     reg  [1:0] c_asrc;
@@ -426,15 +461,16 @@ module core (
     reg  [2:0] c_bsel3;
     reg        c_mem, c_st;
     reg  [2:0] c_wd3;
-    reg        c_csr, c_sys;
+    reg        c_csr, c_sys, c_fi;
 
     always @(*) begin
         c_wr = 1'b0;  c_asrc = SRC_RS1; c_bsel = 2'd0; c_alu = ALU_PASS;
         d_rs1  = 5'h0;  d_rs2  = 5'h0;    d_imm = imm_i;
         c_jbr = 1'b0;   c_jump = 1'b0;    c_ind = 1'b0; c_bsel3 = 3'h0;
         c_mem = 1'b0;   c_st = 1'b0;      c_wd3 = 3'h0;
-        c_csr = 1'b0;   c_sys = 1'b0;
+        c_csr = 1'b0;   c_sys = 1'b0;     c_fi = 1'b0;
         if (is_sys) c_sys = sys0;
+        if (is_fence & fnd_ok) c_fi = (f3 == 3'b001);
         if (is_sys && sys_csr) begin
             c_wr = 1'b1; c_csr = 1'b1;
             c_asrc = f3[2] ? SRC_IMM : SRC_RS1;
@@ -527,6 +563,7 @@ module core (
             idex_jbr <= 1'b0; idex_jump <= 1'b0; idex_ind <= 1'b0; idex_bsel3 <= 3'h0;
             idex_mem <= 1'b0; idex_st <= 1'b0; idex_wd3 <= 3'h0; idex_d <= 32'h0;
             idex_csr <= 1'b0; idex_sys <= 1'b0; idex_legal <= 1'b0;
+            idex_fi  <= 1'b0;
             idex_pf  <= 1'b0;
             idex_instr <= 32'h0; idex_addr <= 32'h0;
             idex_pc <= 32'h0; idex_a <= 32'h0; idex_b <= 32'h0;
@@ -542,6 +579,7 @@ module core (
             idex_csr  <= ifid_v && c_csr;
             idex_pf   <= ifid_v && ifid_pf;
             idex_sys  <= ifid_v && c_sys;
+            idex_fi   <= ifid_v && c_fi;
             idex_instr <= ifid_v ? ifid_instr : 32'h0000_0013;  // nop
             idex_addr <= ifid_v ? (fwd_a + d_imm) : 32'h0;
             idex_wr   <= ifid_v && c_wr;
@@ -814,6 +852,7 @@ module core (
             exma_mem_q <= 1'b0; exma_st_q <= 1'b0; exma_wd3_q <= 3'h0;
             exma_pa_q <= 32'h0; exma_d_q <= 32'h0;
             exma_csr_q <= 1'b0; exma_sys_q <= 1'b0; exma_legal_q <= 1'b0;
+            exma_fi_q  <= 1'b0;
             exma_pf_q <= 1'b0; exma_df_q <= 1'b0; exma_dfc_q <= 4'h0;
             exma_instr_q <= 32'h0; exma_addr_q <= 32'h0;
         end else if (flush) begin
@@ -835,6 +874,7 @@ module core (
             exma_d_q     <= idex_d;
             exma_csr_q   <= idex_csr;
             exma_sys_q   <= idex_sys;
+            exma_fi_q    <= idex_fi;
             exma_legal_q <= idex_legal;
             exma_instr_q <= idex_instr;
             exma_addr_q  <= idex_addr;
@@ -976,6 +1016,16 @@ module core (
     assign int_fire  = exma_v && !stall && !ma_trap && !ma_xret &&
                        !branch_committed && (int_m || int_s);
     assign int_to_s  = !int_m && int_s;
+
+    // ---------------------------------------- fence.i (Zifencei) commit
+    // A pending interrupt wins: fence.i is flushed and re-executes after the
+    // handler returns (traps precede the interrupting instruction's next op).
+    // Commit: redirect self to pc+4 (flush drains the fetch FIFO + discards
+    // in-flight fetch responses) + hold l1_i INVAL until idle (inval_p).
+    // mret/sret invalidate per design.md sec.7 (trap return may enter code a
+    // handler just modified).
+    assign fi_now   = exma_v && exma_fi && !stall && !ma_trap && !int_fire;
+    assign inval_go = fi_now || ma_xret;
 
     // ---------------------------------------- C7: sfence.vma + MPRV
     wire x_sfence   = exma_v && exma_sys && (x_f7 == 7'h09);

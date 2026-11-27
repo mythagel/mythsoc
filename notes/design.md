@@ -303,7 +303,14 @@ F. Perf: Dhrystone (embedded) cycle count -> DMIPS/MHz via TB cycle count;
       B: t02_traps.S 33 checks GREEN (T9 = CSR-forward d=1/d=2 regression);
       C: t03_intr.c 61 checks GREEN; D: t04_mmu.c 53 checks GREEN (Sv32 on
       SoC: MPRV/perm/A-D/U/SUM/MXR/4M-alias/sfence-classes/asid/satp);
-      E: t05_soc.S pending; F: dhrystone pending
+      E: t05_soc.c 94 checks GREEN (interconnect/SoC battery: ROM D-reads, DRAM
+stress+random-walk, null slave, region decode edges, 16550 reg scan,
+loopback+FIFO+trigger-level irq, CLINT regs/mtime-RO/overlap, PLIC gateway
+cycle live on mip, fence.i coherence + mret-inval);
++ fence.i/Zifencei RTL landed (core.v: FENCE/FENCE.I decode, self-redirect,
+INVAL-held-until-idle; req_mmu gated by inval_p — t05 caught the held-INVAL
+translation-overwrite {pc,data} mispair bug);
+F: dhrystone pending
 - [ ] full suite green
 - [ ] yosys synth + nextpnr + ecppack (bitstream) + fmax report
 - [ ] board lpf + openocd + boot stub (BRAM)

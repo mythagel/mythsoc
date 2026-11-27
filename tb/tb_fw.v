@@ -467,6 +467,95 @@ module tb_fw;
         end
     end
 
+    // +FIP: t05 E9 redirect-boundary probe. Ring runs continuously; on the
+    // FIRST exma_v && exma_pc==0x17a4 (fence.i) the ring resets; dump happens
+    // on exma_pc==0x17ac (jalr) -- or 0x17b0 as fallback (jalr entered exma
+    // with a corrupted pc) -- printing the 24 edges of fetch/forward state.
+    localparam FR = 24;
+    reg [31:0] f_ifpc[0:FR-1], f_ipc[0:FR-1], f_xpc[0:FR-1], f_wpc[0:FR-1];
+    reg [31:0] f_fwda[0:FR-1], f_ixa[0:FR-1], f_ares[0:FR-1], f_xres[0:FR-1];
+    reg [31:0] f_wres[0:FR-1], f_fpc[0:FR-1], f_rpc[0:FR-1], f_rf5[0:FR-1];
+    reg [31:0] f_instr[0:FR-1], f_tgt[0:FR-1];
+    reg [31:0] f_pmmu[0:FR-1], f_ppav[0:FR-1], f_pl1[0:FR-1];
+    reg [31:0] f_l1dat[0:FR-1], f_mpa[0:FR-1], f_ifis[0:FR-1];
+    reg [13:0] f_b1[0:FR-1]; // {req_mmu,req_l1,enq,deq,bypass,syn,fresh_mmu,
+                             //  fresh_l1,flush,pav,lio,inval_p,d_mio,d_lio}
+    reg [2:0]  f_l1st[0:FR-1];
+    reg [4:0]  f_rs1[0:FR-1], f_ird[0:FR-1], f_xrd[0:FR-1], f_wrd[0:FR-1];
+    reg [7:0]  f_f[0:FR-1];   // {idex_v, exma_v, mawb_v, iwr, xwr, wwr, lu, st}
+    reg [3:0]  f_fqc[0:FR-1];
+    integer fk;
+    integer fi2, fj;
+    reg fcaught = 1'b0;
+    reg farmed = 1'b0;
+    initial begin
+        fk = 0;
+        if ($test$plusargs("FIP")) forever begin
+            @(negedge clk);
+            if (!rst && !fcaught) begin
+                f_ifpc[fk % FR]  = dut.core0.ifid_pc;
+                f_ipc [fk % FR]  = dut.core0.idex_pc;
+                f_xpc [fk % FR]  = dut.core0.exma_pc;
+                f_wpc [fk % FR]  = dut.core0.mawb_pc;
+                f_fwda[fk % FR]  = dut.core0.fwd_a;
+                f_ixa [fk % FR]  = dut.core0.idex_a;
+                f_ares[fk % FR]  = dut.core0.alu_res;
+                f_xres[fk % FR]  = dut.core0.exma_res;
+                f_wres[fk % FR]  = dut.core0.mawb_res;
+                f_fpc [fk % FR]  = dut.core0.fpc;
+                f_rpc [fk % FR]  = dut.core0.redirect_pc;
+                f_rf5 [fk % FR]  = dut.core0.rf[1];
+                f_instr[fk % FR] = dut.core0.exma_instr;
+                f_tgt [fk % FR]  = dut.core0.exma_target;
+                f_ifis[fk % FR]  = dut.core0.ifid_instr;
+                f_pmmu[fk % FR]  = dut.core0.pc_mmu;
+                f_ppav[fk % FR]  = dut.core0.pc_pav;
+                f_pl1 [fk % FR]  = dut.core0.pc_l1;
+                f_l1dat[fk % FR] = dut.core0.l1_data;
+                f_mpa [fk % FR]  = dut.core0.mmu_pa;
+                f_rs1 [fk % FR]  = dut.core0.rs1;
+                f_ird [fk % FR]  = dut.core0.idex_rd;
+                f_xrd [fk % FR]  = dut.core0.exma_rd;
+                f_wrd [fk % FR]  = dut.core0.mawb_rd;
+                f_f   [fk % FR]  = {dut.core0.idex_v, dut.core0.exma_v,
+                                    dut.core0.mawb_v, dut.core0.idex_wr,
+                                    dut.core0.exma_wr, dut.core0.mawb_wr,
+                                    dut.core0.lu_stall, dut.core0.stall};
+                f_fqc [fk % FR]  = {dut.core0.ifid_v, dut.core0.fq_c};
+                f_b1  [fk % FR]  = {dut.core0.req_mmu, dut.core0.req_l1,
+                                    dut.core0.enq, dut.core0.deq,
+                                    dut.core0.bypass, dut.core0.syn,
+                                    dut.core0.fresh_mmu, dut.core0.fresh_l1,
+                                    dut.core0.flush, dut.core0.pav,
+                                    dut.core0.lio, dut.core0.inval_p,
+                                    dut.core0.d_mio, dut.core0.d_lio};
+                f_l1st[fk % FR]  = dut.core0.l1i.st;
+                fk = fk + 1;
+                if (dut.core0.exma_v && dut.core0.exma_pc === 32'h0000_17a4
+                    && dut.core0.exma_instr === 32'h0000_100f
+                    && dut.core0.fi_now) begin
+                    fk = 0;   // ring restarts at the fence.i COMMIT sample
+                    farmed = 1'b1;
+                end else if (farmed && dut.core0.exma_v &&
+                             dut.core0.exma_instr === 32'h8980_80e7) begin
+                    $display("FIP trigger negedge %0d (xpc=%h)", fk,
+                             dut.core0.exma_pc);
+                    for (fi2 = 0; fi2 < FR; fi2 = fi2 + 1) begin
+                        fj = (fk + fi2) % FR;   // oldest first
+                        $display("F %0d fpc=%h rpc=%h ip=%h is=%h v=%b%b%b%b xp=%h xis=%h b=%b l1st=%d fqc=%o pmm=%h ppv=%h pl1=%h pa=%h ld=%h fw=%h ia=%h ar=%h ra1=%h",
+                                 fi2, f_fpc[fj], f_rpc[fj], f_ipc[fj], f_ifis[fj],
+                                 f_f[fj][7], f_f[fj][6], f_f[fj][5], f_f[fj][2],
+                                 f_xpc[fj], f_instr[fj], f_b1[fj], f_l1st[fj],
+                                 f_fqc[fj], f_pmmu[fj], f_ppav[fj], f_pl1[fj],
+                                 f_mpa[fj], f_l1dat[fj], f_fwda[fj], f_ixa[fj],
+                                 f_ares[fj], f_rf5[fj]);
+                    end
+                    fcaught = 1'b1;
+                end
+            end
+        end
+    end
+
     integer t;
     initial begin
         if ($test$plusargs("LOOP")) loop = 1;

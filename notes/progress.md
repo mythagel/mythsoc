@@ -1,5 +1,40 @@
 # progress
 
+## 2026-11-27 (session 22)
+- t05 SoC/interconnect battery GREEN (94 checks) + fence.i/Zifencei RTL
+  landed (session-21 WIP closed). FULL SUITE GREEN (13 targets).
+- THE REAL BUG this time (rtl/core.v fetch): fence.i/mret/sret hold
+  (inval_p) gated req_l1 ONLY. Held-INVAL window let req_mmu 1-ahead run:
+  translation A arrives (pav/pc_pav latch) but can't be consumed; next
+  response B arrives -> req_l1 issues on B's PA while pc_l1 mux takes the
+  STALE pc_pav (pav?pc_pav:pc_mmu) -> {pc,data} MISPAIR: A orphaned (auipc
+  never fetched), jalr's word executes stamped auipc's pc with ra=stale
+  0x1C -> target (0x1C-0x768)&~1 = 0xFFFFF8B4 -> null-region illegal-instr
+  scan -> mepc wraps FFFFFFFC+4=0 -> _start rerun -> second-pass chk57 on
+  first-pass CLINT values (mtc=...F0, pendb=0xC04 residue was the tell).
+  FIX: req_mmu gated by !inval_p too (fetch pauses fully during hold;
+  1-ahead invariant = fresh response MUST be same-edge consumable).
+  Located by tools/fip_ring.py + tb_fw +FIP ring (24-cyc fetch/forward
+  dump, permanent, plusarg-gated).
+- t05 test fixes (NOT rtl): chk16 rd32(CLINT+0xFFFF) was an UNALIGNED load
+  -> core traps cause 4 correctly -> use aligned unmapped word 0x8000.
+  E6a multi-byte FIFO order: poll DR per byte is useless (DR sticky since
+  byte0 until pop) -> gate on TEMT (sets same tick edge as rx_push,
+  16550.v:100/165) then DR. E6b: E5's wr8(IER,0xFF) blip pulsed the irq
+  LEVEL (ier[1]->irq, 16550.v:203) -> src1 IP latched (gateways latch
+  regardless of enable/threshold; IP held until claim) -> drain claim/
+  complete before trig-level test.
+- X-lesson reused: wb_ram is X; t05 zero-inits dram[16..19]/touched[]
+  before RMW/branch use (my NOFI bisect probe itself bit this: load of
+  unwritten dram[512] -> branch-on-X -> DIFFERENT fake hang; bisect
+  probes must not read .bss).
+- tools/instr_enc.py: verilog-encoded RV32I words for self-mod tests
+  (fence.i=0x0000100f verified); tools/fip_ring.py: FIP log annotator.
+- suite: mmu(71) l1_i(28) l1_d(31) wb_ic(25) 16550(21) clint(36) plic(24)
+  core(54) c8(34) t01(378) t02(33) t03(61) t04(53) t05(94) soc(16) GREEN.
+- next: dhrystone (sec.10 F), C8-Sv32 on-core, synth yosys->nextpnr-ecp5->
+  ecppack, board lpf, README.
+
 ## 2026-11-27 (session 21)
 - t04 MMU GREEN (53 fw checks) + FULL SUITE GREEN. Closed the session-20
   handoff (found WIP: t04_mmu.c drafted, m2 walk-arbiter half-landed,
