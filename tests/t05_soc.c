@@ -75,7 +75,7 @@ static int poll32(uint32_t a, uint32_t mask, uint32_t want, uint32_t budget)
 }
 
 // ROM signature block: .rodata lands in the .text output section = ROM
-// (scripts/link.lds; scripts/fw_build.sh --only-section=.text). Values
+// (scripts/link.lds; Makefile objcopy --only-section=.text). Values
 // stride 0x3C3C3C3C (tool-verified, see notes) -- read ONLY through
 // volatile so clang cannot fold the known constants (E1 must be a REAL
 // bus+cache read).

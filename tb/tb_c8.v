@@ -11,16 +11,10 @@
 // forwarding/hazard bug in the RTL surfaces as a mismatch. Bare (satp=0):
 // VA==PA, DRAM base 0x8000_0000; no page walk (m2 idle).
 //
-// Build (regenerates tb/tb_c8.hex + tb/tb_c8_exp.vh from tb/tb_c8.S):
-//   clang -c -target riscv32-unknown-elf -march=rv32im -mabi=ilp32 -o /tmp/c8.o tb/tb_c8.S
-//   clang --target=riscv32-unknown-elf -march=rv32im -mabi=ilp32 -nostdlib -nostartfiles \
-//         -Wl,-Ttext=0x0 -Wl,--entry=_start -o /tmp/c8.elf /tmp/c8.o
-//   llvm-objcopy -O binary /tmp/c8.elf tb/tb_c8.bin
-//   python3 tools/emu32.py tb/tb_c8.bin --hex tb/tb_c8.hex --exp /tmp/c8_exp.vh
-//   sed 's/C1_NCOMMIT/C8_NCOMMIT/' /tmp/c8_exp.vh > tb/tb_c8_exp.vh
-// Run:
-//   iverilog -g2005 -s tb_c8 tb/tb_c8.v rtl/core.v rtl/mmu.v rtl/l1_i.v rtl/l1_d.v -o tb_c8.vvp
-//   vvp tb_c8.vvp
+// Build + run (regenerates tb/tb_c8.hex + tb/tb_c8_exp.vh from tb/tb_c8.S):
+//   make c8
+// (the Makefile compiles, emu32-goldens, seds C1_NCOMMIT->C8_NCOMMIT, and
+//  builds vvp; sim log -> $(OUT)/c8.log)
 `timescale 1ns/1ps
 module tb_c8;
 

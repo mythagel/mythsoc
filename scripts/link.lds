@@ -1,4 +1,4 @@
-# link.lds -- C firmware link script (scripts/fw_build.sh, dry_build.sh)
+# link.lds -- C firmware link script (Makefile: C-fw t03-t05 + dry t06 flows)
 #
 # .text (code + rodata) @ 0x0 (ROM; _start first, from the entry object).
 # Bootloader contract (tests/fw_entry.S runs it before main):
@@ -9,7 +9,7 @@
 # This matters because wb_ram boots X (rtl/wb_ram.v, board: random):
 # C semantics require zeroed .bss + materialized .data or every global
 # read is X (t06 forensics 2026-11-28: X -> operand -> X flush -> X mio
-# -> unrecoverable fetch freeze). Assembly tests (scripts/fw_asm.sh)
+# -> unrecoverable fetch freeze). Assembly tests (Makefile fw_asm flow)
 # do NOT link the entry loop: they self-zero what they read (t05 rule).
 ENTRY(_start)
 SECTIONS {

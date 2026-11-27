@@ -319,7 +319,7 @@ F. Perf: Dhrystone (embedded) cycle count -> DMIPS/MHz via TB cycle count;
       UART rx irq via PLIC->meip, TX loopback echo, msip, mtime monotonic,
       mcause/mepc latched) — session 18
 - [ ] firmware: tests/*.S + build (clang) — framework tests/fw_tb.S + harness
-      tb/tb_fw.v + scripts/fw_asm.sh + regress.sh:
+      tb/tb_fw.v + Makefile (fw image rules + regress targets):
       A: t01_isa.S GENERATED (tools/isa_gen.py) 378 checks GREEN;
       B: t02_traps.S 33 checks GREEN (T9 = CSR-forward d=1/d=2 regression);
       C: t03_intr.c 61 checks GREEN; D: t04_mmu.c 53 checks GREEN (Sv32 on
@@ -337,7 +337,7 @@ bootloader (.data copy + .bss zero) in tb_fw; RUNS=5 -> 2480 cyc/run,
 fixed 2 real bugs (rf_we_w !stall WB-drop, negative-verified by C8-T25;
 missing bootloader = production gap, fixed in link.lds/fw_entry.S);
 tb_fw XGUARD now always-on (fail-fast on X rf-write / fetch-ctrl X)
-- [x] full suite green (regress.sh: mmu l1_i l1_d wb_ic 16550 clint plic
+- [x] full suite green (make regress: mmu l1_i l1_d wb_ic 16550 clint plic
       core(54) c8(36) t01-t06 soc(16) — session 24; t04 WDT->800k, t05 500k,
       t06 1M: bootloader .bss-zero adds ~215k cyc on t04, ~119k on t06)
 - [ ] yosys synth + nextpnr + ecppack (bitstream) + fmax report

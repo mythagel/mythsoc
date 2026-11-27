@@ -1,7 +1,7 @@
 // tb_soc -- mythrv32 SoC top testbench (simulation)
 //
 // Instantiates soc (core + wb_ic + ROM/DRAM/16550/CLINT/PLIC) with firmware
-// from ROM (tb/tb_soc_fw.hex, built by scripts/soc_asm.sh).
+// from ROM (tb/tb_soc_fw.hex, built by the Makefile soc image rule).
 //
 // Boot phase (firmware, M-mode Bare): ROM fetch -> wb_ic -> DRAM store/load,
 // mul/div, loop sum -> DRAM words 0..4, sentinel word 5 last.
@@ -20,12 +20,10 @@
 // All waits are bounded (CAP cycles) so the TB always terminates; a stuck
 // phase prints P<phase>-STUCK with core/PLIC/UART/CLINT state.
 //
-// Build: scripts/soc_asm.sh tb/tb_soc_fw.S tb/tb_soc_fw.hex
-// Run:
-//   iverilog -g2005 -s tb_soc tb/tb_soc.v rtl/soc.v rtl/core.v rtl/mmu.v \
-//     rtl/l1_i.v rtl/l1_d.v rtl/wb_ic.v rtl/wb_ic_mfifo.v rtl/wb_rom.v \
-//     rtl/wb_ram.v rtl/16550.v rtl/clint.v rtl/plic.v -o tb_soc.vvp
-//   vvp tb_soc.vvp
+// Build + run:
+//   make soc
+// (the Makefile builds tb/tb_soc_fw.hex, compiles this TB against $(RTL),
+//  runs vvp under a $(WDT_SEC) timeout; sim log -> $(OUT)/soc.log)
 `timescale 1ns/1ps
 module tb_soc;
 

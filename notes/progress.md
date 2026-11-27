@@ -1,5 +1,30 @@
 # progress
 
+## 2026-11-28 (session 25)
+- BUILD: scripts/*.sh -> top-level Makefile (git rm scripts/core_asm.sh,
+  fw_asm.sh, fw_build.sh, dry_build.sh, soc_asm.sh, regress.sh; scripts/ keeps
+  link.lds). Targets: make regress (continue-on-fail, ALL GREEN summary),
+  one bench per name (mmu l1_i l1_d wb_ic 16550 clint plic core c8 t01..t06
+  soc), make images (ROM/goldens only), make clean. Knobs: OUT (default
+  /tmp/opencode/regress), WDT_SEC, RUNS (t06 -DDRY_RUNS; flag change is NOT
+  auto-detected -> touch tests/dry1.c). Toolchain pinned CC=clang/llvm-nm/
+  objcopy/objdump (make predefines CC=cc; needs riscv32 target).
+- Flows preserved 1:1: core_asm (clang -c/-Ttext=0 link -> bin -> emu32
+  golden + irq .vh, grouped target `&:` for multi-output); fw_asm (fw_tb.o
+  links FIRST); C-fw (fw_entry+test+fw_traps via link.lds + _start/dram/
+  symbol gates + 16KiB ROM gate + fw_ranges SPAN check); dry (+objdump
+  call-fidelity gates, build/dry/ so flag sets don't collide with build/c/);
+  soc_asm. tb_fw.vvp: hex is a RUN dep ($readmemh at sim time); core/c8 .vh
+  goldens are BUILD deps (compile-time `include). tb-hardcoded artifact
+  paths kept (tb/*.hex/*_exp.vh/*_irq.vh); all .o/.elf/.bin -> build/.
+- tools/bin2hex.py new: the inline bin->word-image python shared by 3 scripts
+  (AGENTS rule 2: tool, not copy-paste). tools/emu32.py embeds its input bin
+  path in the .vh header -> committed tb/tb_core_exp.vh + tb/tb_c8_exp.vh
+  header lines now read "from build/tb_*.bin" (comment-only; all hex images
+  byte-identical to pre-migration, verified by md5 after make images -B).
+- Doc-comment refs updated: tb/tb_c8.v + tb/tb_soc.v build stanzas -> `make
+  c8`/`make soc`; tb/tb_fw.v -> make t01..t06; tests/fw_tb.S, t05_soc.c.
+
 ## 2026-11-28 (session 24)
 - t06 Dhrystone (design.md sec.10 F) GREEN: tests/dry.c/dry2.c/dry.h/dry_lib.c
   (Dhrystone 2.2a port, freestanding libc) + tests/dry1.c driver (RUNS=5,

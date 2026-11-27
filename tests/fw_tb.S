@@ -1,6 +1,6 @@
 # fw_tb.S -- shared framework for the firmware test suite (design.md sec.10)
 #
-# Link order: fw_tb.o FIRST, then the test object (scripts/fw_asm.sh).
+# Link order: fw_tb.o FIRST, then the test object (Makefile, fw_asm flow).
 # Layout: _start (this file) -> _fw_test (the test, in the test object).
 #
 # Protocol (with tb/tb_fw.v):
