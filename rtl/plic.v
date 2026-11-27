@@ -135,7 +135,9 @@ module plic (
                     if (src >= 10'd1 && src <= 10'd16)
                         prio[srcidx] <= DAT_I;
                 end else if (d_en) begin
-                    en[ectxi] <= DAT_I[16:0];
+                    // bit 0 = source 0 does not exist: HARDWIRED 0 (plic
+                    // spec ch.6; review F13)
+                    en[ectxi] <= {DAT_I[16:1], 1'b0};
                 end else if (d_thr) begin
                     thr[tcx] <= DAT_I;
                 end

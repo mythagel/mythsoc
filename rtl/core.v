@@ -79,8 +79,11 @@ module core (
     wire [31:0] mip_r = (meip ? 32'h800 : 32'h0) | (seip ? 32'h200 : 32'h0)
                       | (ssip_r ? 32'h2 : 32'h0);
     localparam [31:0] MISA_VAL = 32'h40001100;   // tools/misa.py: RV32IM
-    localparam [31:0] MSTATUS_WMASK = 32'h000e1baa;
-    localparam [31:0] SSTATUS_MASK  = 32'h000c0322;
+    // bit 9 (SPV) excluded: H-extension field, WPRI here, and "implementations
+    // that do not furnish these fields must make them read-only zero"
+    // (priv 2.3.1 WPRI) -- review F8.
+    localparam [31:0] MSTATUS_WMASK = 32'h000e19aa;
+    localparam [31:0] SSTATUS_MASK  = 32'h000c0122;
     localparam [31:0] MEDELEG_MASK  = 32'h0000b7ff;
     localparam [31:0] MIDELEG_MASK  = 32'h00000222;
     localparam [31:0] MIE_MASK      = 32'h00000aaa;
@@ -114,14 +117,20 @@ module core (
     wire        branch_committed = exma_v && exma_jbr && exma_taken;
     // fence.i: self-redirect to pc+4 reuses the full flush machinery (kill
     // younger + drain fetch FIFO + discard in-flight fetch responses).
+    // sf_now: sfence.vma commit pulse (defined in the C7 section). Review F6:
+    // the SFENCE.VMA ordering guarantee covers implicit references (fetch
+    // translations) made BY SUBSEQUENT instructions, so pre-sfence fetches
+    // sitting in the FIFO / in flight must be discarded -> sfence
+    // self-redirects to pc+4 like fence.i (no I$ INVAL: lines are PA-keyed
+    // and the flushed TLB re-walks).
     wire        redirect = branch_committed || ma_trap || ma_xret || int_fire
-                         || fi_now;
+                         || fi_now || sf_now;
     wire        flush = redirect;
     wire [31:0] trap_pc_i = int_to_s ? {stvec[31:2], 2'b00} : {mtvec[31:2], 2'b00};
     wire [31:0] redirect_pc = ma_trap ? trap_pc
                               : ma_xret ? xret_pc
                               : branch_committed ? exma_target
-                              : fi_now ? (exma_pc + 32'd4)
+                              : (fi_now || sf_now) ? (exma_pc + 32'd4)
                               : trap_pc_i;
 
     // ------------------------------------------------------------ fetch (IF)
@@ -173,7 +182,17 @@ module core (
     // while an I$ INVAL is pending, do not issue REQ (l1_i applies INVAL only
     // at W_IDLE without a same-cycle REQ; a REQ there could hit a line that
     // the pending invalidate must kill first).
-    wire req_l1   = !flush && !syn && t_pa_v && l1_free && space && !inval_p;
+    // t_fault gates req_l1 TOO (review F1): a faulted translation has no
+    // fetchable line, yet syn (the marker) requires !stall and FIFO space.
+    // With a stalled pipe / full-ish FIFO an ungated req_l1 would issue a
+    // cache read of the faulted PA; the response later enqueues as a NORMAL
+    // instruction and the cause-12 fetch fault is silently lost (same
+    // 1-AHEAD invariant as the !inval_p gate below: a held response must be
+    // consumable, else the window closes or fetch pauses - it must never
+    // run half-consumed). With this gate the faulted pav stays held until
+    // syn fires.
+    wire req_l1   = !flush && !syn && t_pa_v && !t_fault
+                    && l1_free && space && !inval_p;
     // NB (t05): !inval_p gates req_mmu TOO. The pav 1-ahead scheme requires a
     // fresh response to be consumed by req_l1 on its arrival edge. With req_l1
     // held (INVAL pending) an ungated req_mmu issues the NEXT translation
@@ -181,8 +200,20 @@ module core (
     // pc_pav (orphaning the held VA: instruction skipped) while pc_l1 takes
     // the STALE pc_pav (-> {pc,data} mispair). fence.i/mret held INVAL =>
     // fetch must pause, not half-run.
-    wire req_mmu  = !flush && !sf_now && !sf_h && !pav && !inval_p
-                    && (!mio || (fresh_mmu && l1_free && space));
+    // F1b companion: a fresh FAULT is only consumable by syn (markers need
+    // !stall + space). If syn cannot fire this cycle, req_mmu must NOT
+    // 1-ahead-reissue: the replacement fresh response would overwrite
+    // pc_pav/pav_f and ORPHAN the held fault -> epc/mtval off by one insn
+    // (marker enqueued for a VA that was never faulted). Same pause
+    // invariant as F1/!inval_p.
+    // !d_mio: flush clears mio while a walk is STILL in flight (mmu.v drops
+    // REQ during a walk, mmu.v header protocol). Without this gate the
+    // post-redirect request is silently dropped yet fpc advances -> HOLE in
+    // the fetch stream (instruction never fetched). D-side req_md already
+    // has the symmetric !d_md guard (C8); I-side was missing it.
+    wire req_mmu  = !flush && !sf_now && !sf_h && !pav && !inval_p && !d_mio
+                    && (!mio || (fresh_mmu && l1_free && space
+                                 && (!mmu_fault || syn)));
 
     always @(posedge clk or posedge rst) begin
         if (rst) begin
@@ -443,7 +474,7 @@ module core (
     wire sys_sret   = sys0 && (f7 == 7'h08) && (rs2 == 5'd2);
     wire sys_mret   = sys0 && (f7 == 7'h18) && (rs2 == 5'd2);
     wire sys_csr    = (f3 == 3'b001) || (f3 == 3'b010) || (f3 == 3'b011)
-                    || (f3 == 3'b101) || (f3 == 3'b110) || (f3 == 3'b111);
+                    || (f3 == 3'b101) || (f3 == 3'b110);   // f3=111 reserved (F4)
     wire sys_ok     = sys_csr || sys_ecall || sys_ebreak || sys_wfi
                     || sys_sfence || sys_sret || sys_mret;
     wire legal      = (is_op & op7_ok) | (is_opimm & opimm_ok) | is_lui | is_auipc
@@ -906,8 +937,15 @@ module core (
     wire [31:0] x_zimm = {27'h0, exma_instr[19:15]};
     wire [31:0] x_src  = x_f3[2] ? x_zimm : exma_res;  // rs1 val rode ALU PASS      // wdata: zimm | rs1
     wire        is_csr_op = exma_v && exma_csr;
+    // Write-ATTEMPT rule (unpriv 6.1 / Table 7, review F3): CSRRW[I] always
+    // writes; CSRRS/CSRRC write iff the rs1 FIELD != x0 (NOT the forwarded
+    // value - rs1=x5 holding 0 still performs a whole-CSR write, so an RO
+    // CSR must trap); CSRRSI/CSRRCI write iff uimm != 0.
+    wire        csr_rs1_zero = (exma_instr[19:15] == 5'h0);
     wire        csr_wr_attempt = is_csr_op &&
-                    ((x_f3[1:0] == 2'b01) || (x_src != 32'h0)); // RW always; RS/RC if src!=0
+                    ((x_f3[1:0] == 2'b01) ? 1'b1
+                     : x_f3[2] ? (x_src != 32'h0)
+                     : !csr_rs1_zero);
 
     // CSR register file (read mux)
     reg [31:0] csr_rdata;
@@ -969,7 +1007,8 @@ module core (
 
     wire trap_pf   = exma_v && exma_pf;               // C7 fetch page fault
     wire trap_df   = exma_v && exma_df && !mis_ld && !mis_st;  // C7 data pf
-    wire trap_illegal = exma_v && (!exma_legal || csr_illegal || xret_priv_bad);
+    wire trap_illegal = exma_v && (!exma_legal || csr_illegal || xret_priv_bad
+                                   || sf_bad_priv);
     wire trap_ecall   = sys_ecall_;
     wire trap_ebreak  = sys_ebreak_;
     wire trap_misld   = mis_ld;
@@ -1012,14 +1051,34 @@ module core (
     wire [31:0] s_pend = mie & mip_p &  mideleg;
     wire int_m = (m_pend != 32'h0) && m_gate && (priv != PM || mstatus[3]);
     wire int_s = (s_pend != 32'h0) && s_gate;
-    // fire only on a clean sequential retire (no trap/xret/branch that cycle)
+    // Cause code = highest-priority set bit of the pending vector (review F2;
+    // priv 3.1.9: M-destined order MEI(11)>MSI(3)>MTI(7)>SEI(9)>SSI(1)>STI(5),
+    // S-destined SEI(9)>SSI(1)>STI(5)). This hart implements bits 11/9 (PLIC
+    // pins) and 1 (mip/sip.SSIP CSR); the full chain keeps the code correct
+    // if more sources are wired later. Old RTL hardcoded 11/9.
+    wire [31:0] int_m_cause = m_pend[11] ? 32'h8000_000B :
+                              m_pend[3]  ? 32'h8000_0003 :
+                              m_pend[7]  ? 32'h8000_0007 :
+                              m_pend[9]  ? 32'h8000_0009 :
+                              m_pend[1]  ? 32'h8000_0001 : 32'h8000_0005;
+    wire [31:0] int_s_cause = s_pend[9] ? 32'h8000_0009 :
+                              s_pend[1] ? 32'h8000_0001 : 32'h8000_0005;
+    wire [31:0] int_cause   = int_m ? int_m_cause : int_s_cause;
+    // fire only on a clean sequential retire (no trap/xret/branch that cycle).
+    // fence_commit: fence.i / legal sfence.vma are NOT interrupt points --
+    // int_fire on the same cycle would suppress the commit (fi_now/sf_now
+    // hold !int_fire) while epc=pc+4 SKIPS the fence entirely (the session-22
+    // comment's "re-executes" was wrong: an interrupt never rewinds epc).
+    // Deferring the interrupt to the next retire is always legal.
+    wire fence_commit = exma_v && (exma_fi || (x_sfence && !sf_bad_priv));
     assign int_fire  = exma_v && !stall && !ma_trap && !ma_xret &&
-                       !branch_committed && (int_m || int_s);
+                       !branch_committed && !fence_commit && (int_m || int_s);
     assign int_to_s  = !int_m && int_s;
 
     // ---------------------------------------- fence.i (Zifencei) commit
-    // A pending interrupt wins: fence.i is flushed and re-executes after the
-    // handler returns (traps precede the interrupting instruction's next op).
+    // fence.i is not an interrupt point (fence_commit gates int_fire):
+    // taking the interrupt here would skip the fence (epc=pc+4) while the
+    // commit pulse is suppressed.
     // Commit: redirect self to pc+4 (flush drains the fetch FIFO + discards
     // in-flight fetch responses) + hold l1_i INVAL until idle (inval_p).
     // mret/sret invalidate per design.md sec.7 (trap return may enter code a
@@ -1029,9 +1088,21 @@ module core (
 
     // ---------------------------------------- C7: sfence.vma + MPRV
     wire x_sfence   = exma_v && exma_sys && (x_f7 == 7'h09);
-    wire sf_now = x_sfence && !stall;          // commit-cycle pulse
-    wire [1:0] sf_typ = (exma_res == 32'h0) ? ((exma_d == 32'h0) ? 2'b01 : 2'b10)
-                                            : 2'b11;
+    // SFENCE.VMA is a supervisor instruction: U-mode attempt is illegal (F5)
+    // and must NOT flush. On commit it self-redirects to pc+4 (F6, see
+    // redirect) to discard pre-sfence fetches: the ordering guarantee covers
+    // implicit references of instructions SUBSEQUENT to the fence.
+    wire sf_bad_priv = x_sfence && (priv == PU);
+    wire sf_now = x_sfence && !sf_bad_priv && !stall;  // int_fire cannot
+    // coexist: fence_commit excludes this cycle from int_fire (see C6).
+    // Spec 12.1.7.5 (review F17): the three sfence cases are keyed on WHICH
+    // rs FIELD is x0, not on operand VALUES -- sfence.vma x0,xN (N!=x0)
+    // holding asid 0 is still an ASID-specified fence; global mappings are
+    // NOT fenced (old value-based decode silently became sf_all and killed
+    // G entries).
+    wire [1:0] sf_typ = (exma_instr[19:15] == 5'h0) ? ((exma_instr[24:20] == 5'h0)
+                                                       ? 2'b01 : 2'b10)
+                                                    : 2'b11;
     reg  sf_h;                                   // 1-cyc mmu REQ hold
     always @(posedge clk or posedge rst)
         if (rst) sf_h <= 1'b0; else sf_h <= sf_now;
@@ -1065,7 +1136,7 @@ module core (
                     12'h302: medeleg <= csr_wv & MEDELEG_MASK;
                     12'h303: mideleg <= csr_wv & MIDELEG_MASK;
                     12'h304: mie     <= csr_wv & MIE_MASK;
-                    12'h305: mtvec   <= {csr_wv[31:1], 1'b0};   // MODE=0 direct only
+                    12'h305: mtvec   <= {csr_wv[31:2], 2'b00};  // MODE forced 0 (direct only, F7)
                     12'h340: mscratch_r <= csr_wv;
                     12'h341: mepc    <= {csr_wv[31:1], 1'b0};
                     12'h342: mcause  <= csr_wv;
@@ -1074,13 +1145,15 @@ module core (
                     12'h100: mstatus <= (mstatus & ~SSTATUS_MASK)
                                      | (csr_wv & SSTATUS_MASK);
                     12'h104: mie     <= (mie & ~mideleg) | (csr_wv & mideleg);
-                    12'h105: stvec   <= {csr_wv[31:1], 1'b0};
+                    12'h105: stvec   <= {csr_wv[31:2], 2'b00};  // MODE forced 0 (F7)
                     12'h140: sscratch <= csr_wv;
                     12'h141: sepc    <= {csr_wv[31:1], 1'b0};
                     12'h142: scause  <= csr_wv;
                     12'h143: stval   <= csr_wv;
+                    12'h144: ssip_r  <= (ssip_r & ~mideleg[1])
+                                      | (csr_wv[1] & mideleg[1]); // sip.SSIP writable when delegated (F10)
                     12'h14D: stimecmp_r <= csr_wv;
-                    12'h180: satp_r  <= csr_wv;
+                    12'h180: satp_r  <= csr_wv & 32'hFFCFFFFF; // PPN[21:20] WARL 0: 32-bit PA space (F12; mask=tools ~(3<<20))
                     default: ;
                 endcase
             end
@@ -1089,7 +1162,7 @@ module core (
                 if (trap_to_s || int_to_s) begin
                     sepc   <= int_fire ? (exma_pc + 32'h4)
                                        : {exma_pc[31:1], 1'b0};
-                    scause <= int_fire ? 32'h8000_0009 : trap_cause;
+                    scause <= int_fire ? int_cause : trap_cause;
                     stval  <= int_fire ? 32'h0 : trap_tval;
                     mstatus[8] <= priv[0];            // SPP
                     mstatus[5] <= mstatus[1];         // SPIE <- SIE
@@ -1098,7 +1171,7 @@ module core (
                 end else begin
                     mepc   <= int_fire ? (exma_pc + 32'h4)
                                        : {exma_pc[31:1], 1'b0};
-                    mcause <= int_fire ? 32'h8000_000B : trap_cause;
+                    mcause <= int_fire ? int_cause : trap_cause;
                     mtval  <= int_fire ? 32'h0 : trap_tval;
                     mstatus[12:11] <= priv;           // MPP (arch encoding)
                     mstatus[7] <= mstatus[3];         // MPIE <- MIE
@@ -1107,18 +1180,22 @@ module core (
                 end
             end
             // --- xret ---
+            // MPRV (review F9, priv "if y != M, xRET also sets MPRV=0"):
+            // mret clears MPRV only when returning BELOW M (MPP != M); sret's
+            // target y=SPP is always < M, so it always clears.
             if (ma_xret) begin
                 if (ma_mret) begin
                     priv           <= mstatus[12:11];
                     mstatus[3]     <= mstatus[7];     // MIE  <- MPIE
                     mstatus[7]     <= 1'b1;           // MPIE <- 1
                     mstatus[12:11] <= PU;             // MPP  <- U (lowest)
-                    mstatus[17]    <= 1'b0;           // MPRV cleared on mret
+                    if (mstatus[12:11] != PM) mstatus[17] <= 1'b0;
                 end else begin
                     priv          <= {1'b0, mstatus[8]};  // SPP: 0=U 1=S
                     mstatus[1]    <= mstatus[5];      // SIE  <- SPIE
                     mstatus[5]    <= 1'b1;            // SPIE <- 1
                     mstatus[8]    <= 1'b0;            // SPP  <- U
+                    mstatus[17]   <= 1'b0;            // sret: y < M always
                 end
             end
         end

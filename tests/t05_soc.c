@@ -315,8 +315,8 @@ int main(void)
     chk(70, rd32(P_PRIO0 + 0x14u) == 3u);
     wr32(P_PRIO0 + 0x44u, 9u);                      // prio[17]: src>16 resv
     chk(71, rd32(P_PRIO0 + 0x44u) == 0u);
-    wr32(P_EN1, 0x0001FFFFu);                       // ctx1 en: 17 bits RW
-    chk(72, rd32(P_EN1) == 0x0001FFFFu);
+    wr32(P_EN1, 0x0001FFFFu);                       // ctx1 en: bits16:1 RW;
+    chk(72, rd32(P_EN1) == 0x0001FFFEu);            // bit0=src0 hardwired 0 (PLIC ch.6)
     wr32(P_EN1 + 4u, 0xFFu);                        // enable word 1 undecoded
     chk(73, rd32(P_EN1 + 4u) == 0u);
     wr32(P_EN1, 0u);

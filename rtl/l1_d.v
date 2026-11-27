@@ -3,8 +3,9 @@
 // 1-word lines: 1024 x 32b. Index PA[11:2], tag PA[31:12].
 // Write-through; STORE miss writes memory directly (line NOT filled); store
 // hit writes line + writes through. LOAD miss fetches AND FILLS — but only
-// for the cacheable window (design.md sec.2: DRAM PA[31:22]==10'h200).
-// DEVICE PAs (PLIC/CLINT/UART/ROM) are strict pass-through: no hit ever,
+// for the cacheable window (design.md sec.2: DRAM PA[31:22]==10'h200, plus
+// ROM PA[31:22]==10'h000 -- immutable).
+// DEVICE PAs (PLIC/CLINT/UART) are strict pass-through: no hit ever,
 // no fill — device reads have side effects (PLIC claim, UART R0 pop) and
 // must never see stale line data (tb_soc p2 storm, session 17).
 // WB B4 master (SoC master m1, read/write): 1 STB pulse per transfer,

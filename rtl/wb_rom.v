@@ -28,8 +28,11 @@ module wb_rom #(
         if (ROM_HEX != "") $readmemh(ROM_HEX, mem);
     end
 
-    always @(posedge clk) begin
-        if (STB_I) begin
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin           // WB B4 3.1.1: interfaces init to a defined
+            ACK_O <= 1'b0;       // state (review F15; rst port was unused)
+            DAT_O <= 32'h0;
+        end else if (STB_I) begin
             ACK_O <= 1'b1;
             DAT_O <= mem[idx];
         end else ACK_O <= 1'b0;

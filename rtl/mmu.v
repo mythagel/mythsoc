@@ -25,7 +25,9 @@
 //             PPN0[19:10] PPN1[31:20]
 //   M-mode / satp.MODE==0 (Bare): identity PA=VA, no walk, no TLB use.
 //   structural faults (no TLB fill): v=0; R=0&W=1; non-leaf with D|A|U set;
-//     4K leaf (L0) with R=X=0; 4M leaf (L1) with PPN[9:0]!=0.
+//     4K leaf (L0) with R=X=0; 4M leaf (L1) with PPN[9:0]!=0; any PTE with
+//     PPN[21:20]!=0 (derived PA/PTE addr escapes the 32-bit SoC space ->
+//     fault, NEVER wrap; root: satp.PPN[21:20], see core satp WARL mask).
 //   permission/A-D (re-checked on hit, so per access type): fetch needs X;
 //     load R (MXR=1: R|X); store/AMO W (AMO also R; cause always store).
 //     S-mode: U=1 pages fault unless (SUM=1 && !fetch); fetch on U=1 always
@@ -47,7 +49,7 @@
 //     fill counter (FIFO within sets; hits do not refresh). Invalid-first is
 //     required: invalidated ways keep stale stamps, and raw min-stamp across
 //     a 4-bit wrap would evict just-filled valid entries (t04 chk42).
-//   PA on hit: 4K {pa12, VA[11:0]}; 4M {pa12[11:2], VA[21:0]}
+//   PA on hit: 4K {pa12, VA[11:0]}; 4M {pa12[19:10], VA[21:0]}
 // sfence.vma: SF_I: 00=none 01=all 10=asid (SFASID_I) 11=page(VA_I);
 //   page-granular over-flush (spec-safe). A sfence that arrives mid-walk is
 //   held pending and applied after the walk's TLB fill (a speculative walk
@@ -223,6 +225,11 @@ module mmu (
     wire        sfault = chk_fault(ACC_I, MODE_I, h_r, h_w, h_x, h_u, h_a, h_d,
                                    SUM_I, MXR_I);
     wire        mbare = !SATP_I[31] || MODE_I == 2'd0;
+    // F11: satp.PPN[21:20] != 0 puts the root table beyond the 32-bit
+    // physical space (walk address would WRAP, not escape). The core masks
+    // these bits WARL on satp writes (F12); this REQ-path guard faults for
+    // any other SATP_I drive (tb / future integration), never wraps.
+    wire        ovf1  = SATP_I[31] && (SATP_I[21:20] != 2'b00);
 
     // m2-arbiter handshake (core: two MMU walkers share the m2 read port).
     // BUSY_O: holding a walk / an m2 read is outstanding (must not preempt).
@@ -244,12 +251,18 @@ module mmu (
     assign WE_O  = 1'b0;
     assign ADR_O = (st == S_W1S) ? a1[31:0] : pte0a_r;
 
-    // W1W decode (structural): leaf = R|X; reserved perms = R=0,W=1
+    // W1W decode (structural): leaf = R|X; reserved perms = R=0,W=1;
+    // PPN[21:20] != 0 (PTE[31:30]) escapes the 32-bit physical space of this
+    // SoC: the derived L0-table address (4M leaf: the output PA) cannot be
+    // represented on the 32-bit bus. Truncate-and-wrap would ALIAS real
+    // memory (design.md sec.7 documents escape -> fault), so terminate:
+    // fault, no walk continue, no TLB fill (review F11).
     wire        w1_leaf = DAT_I[1] | DAT_I[3];
     wire        w1_bad = !DAT_I[0] ||
                           (!DAT_I[1] && DAT_I[2]) ||
                           (!DAT_I[1] && !DAT_I[3] &&
-                           (DAT_I[7] | DAT_I[6] | DAT_I[4]));
+                           (DAT_I[7] | DAT_I[6] | DAT_I[4])) ||
+                          (DAT_I[31:30] != 2'b00);
 
     // -------------------------------------------------- incoming PTE compute
     // PTE = DAT_I (the word the WB read just returned). frm_eff is known per
@@ -264,6 +277,7 @@ module mmu (
     wire r_bad_i = !pi_v ||
                    (!pi_r && pi_w) ||
                    (!pi_leaf && (pi_d | pi_a | pi_u)) ||
+                   (pi_ppn[21:20] != 2'b00) ||   // F11: PA/PTE-addr escapes 32b space
                    (frm_eff && pi_leaf && pi_ppn[9:0] != 10'd0) ||
                    (!frm_eff && !pi_leaf);
     wire [31:0] pa_i = frm_eff ? {pi_ppn[19:10], va_r[21:0]} :
@@ -375,6 +389,10 @@ module mmu (
                         PA_O <= VA_I; FAULT_O <= 1'b0; CAUSE_O <= 4'h0;
                         st <= S_RESP;
                     end else if (!h_hit) begin
+                        if (ovf1) begin
+                            PA_O <= VA_I; FAULT_O <= 1'b1; CAUSE_O <= cause_req;
+                            st <= S_RESP;
+                        end else begin
                         va_r <= VA_I;
                         satp_r <= SATP_I;
                         acc_r <= ACC_I;
@@ -384,6 +402,7 @@ module mmu (
                         asid_r <= SATP_I[30:22];
                         if (GRANT_I) begin st <= S_W1S; pend <= 1'b0; end
                         else pend <= 1'b1;
+                        end
                     end else begin
                         PA_O <= pa_hit; FAULT_O <= sfault;
                         CAUSE_O <= cause_req;
@@ -416,6 +435,9 @@ module mmu (
                     if (mbare) begin
                         PA_O <= VA_I; FAULT_O <= 1'b0; CAUSE_O <= 4'h0;
                     end else if (!h_hit) begin
+                        if (ovf1) begin
+                            PA_O <= VA_I; FAULT_O <= 1'b1; CAUSE_O <= cause_req;
+                        end else begin
                         va_r <= VA_I;
                         satp_r <= SATP_I;
                         acc_r <= ACC_I;
@@ -428,6 +450,7 @@ module mmu (
                         // walker's STB with the other walker's m2 read.
                         if (GRANT_I) st <= S_W1S;
                         else begin st <= S_IDLE; pend <= 1'b1; end
+                        end
                     end else begin
                         PA_O <= pa_hit; FAULT_O <= sfault;
                         CAUSE_O <= cause_req;

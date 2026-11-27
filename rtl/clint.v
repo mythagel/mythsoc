@@ -24,6 +24,8 @@
 // Comparisons unsigned (priv spec: "greater than or equal", unsigned).
 //
 // Reset: mtimecmp/stimecmp = all 1 (no pending), msip/sstip/mtip = 0.
+// BIT FORMAT (priv 3.2 msip; design sec.4; review F14): these are
+// per-hart-flag registers -- bits 31:1 read as ZERO, bit 0 = hart 0 flag.
 // WB B4: single cycle; DAT_O valid when ACK_O; no ERR/STALL.
 `default_nettype none
 
@@ -140,21 +142,21 @@ module clint (
                     if (SEL_I[1] && b1[15:2] == 14'h0000) wt = merge_byte(wt, DAT_I[15:8], b1[1:0]);
                     if (SEL_I[2] && b2[15:2] == 14'h0000) wt = merge_byte(wt, DAT_I[23:16], b2[1:0]);
                     if (SEL_I[3] && b3[15:2] == 14'h0000) wt = merge_byte(wt, DAT_I[31:24], b3[1:0]);
-                    msip <= wt;
+                    msip <= {31'h0, wt[0]};
                     // sstip (0x0004)
                     wt = sstip;
                     if (SEL_I[0] && b0[15:2] == 14'h0001) wt = merge_byte(wt, DAT_I[7:0],  b0[1:0]);
                     if (SEL_I[1] && b1[15:2] == 14'h0001) wt = merge_byte(wt, DAT_I[15:8], b1[1:0]);
                     if (SEL_I[2] && b2[15:2] == 14'h0001) wt = merge_byte(wt, DAT_I[23:16], b2[1:0]);
                     if (SEL_I[3] && b3[15:2] == 14'h0001) wt = merge_byte(wt, DAT_I[31:24], b3[1:0]);
-                    sstip <= wt;
+                    sstip <= {31'h0, wt[0]};
                     // mtip (0x7000)
                     wt = mtip;
                     if (SEL_I[0] && b0[15:2] == 14'h1C00) wt = merge_byte(wt, DAT_I[7:0],  b0[1:0]);
                     if (SEL_I[1] && b1[15:2] == 14'h1C00) wt = merge_byte(wt, DAT_I[15:8], b1[1:0]);
                     if (SEL_I[2] && b2[15:2] == 14'h1C00) wt = merge_byte(wt, DAT_I[23:16], b2[1:0]);
                     if (SEL_I[3] && b3[15:2] == 14'h1C00) wt = merge_byte(wt, DAT_I[31:24], b3[1:0]);
-                    mtip <= wt;
+                    mtip <= {31'h0, wt[0]};
                     // mtimecmp[31:0] (0x4000)
                     wt = mtimecmp[31:0];
                     if (SEL_I[0] && b0[15:2] == 14'h1000) wt = merge_byte(wt, DAT_I[7:0],  b0[1:0]);

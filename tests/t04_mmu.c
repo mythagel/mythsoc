@@ -32,6 +32,8 @@
 // set 3) from being evicted by the asid1 fill: set3 4K entries = {U,RF,AL3}.
 // l0a: [0]RO-A-D [1]RW no-D [2]RWX no-A [3]RWXUAD [4]X-only-AD [5]RWXAD
 //      [6]XU-AD blob [7]RO-AD (fetch tgt) [8]RWXAD-G [9]nonleaf+A [10]R0W1
+//      [11]XN code page (F1 guard: div at -8, nop at -4, next VA unmapped)
+//      [13]X2 blob page, [14]XO -> remapped to XN2 by blob (F6 guard)
 // l0b: [1]=pgB [3]=pgA [6]=pgC2; l0b1 (asid1): [3]=pgF.
 // U blob offsets: lw-S@0x10, ecall@0x14, ebreak@0x24 (llvm-mc encoded).
 //
@@ -80,6 +82,9 @@
 #define VA_G     0x50008000u
 #define VA_NL    0x50009000u
 #define VA_R0W1  0x5000A000u
+#define VA_XN    0x5000B000u
+#define VA_X2    0x5000D000u
+#define VA_XO    0x5000E000u
 #define VA_AL1   0x70001000u
 #define VA_AL3   0x70003000u
 #define VA_AL6   0x70006000u
@@ -127,6 +132,12 @@ uint32_t pgC2[2]  __attribute__((aligned(4096)));
 uint32_t pgD[2]   __attribute__((aligned(4096)));
 uint32_t pgF[2]   __attribute__((aligned(4096)));
 uint32_t pgNL[2]  __attribute__((aligned(4096)));
+uint32_t pgXN[1024] __attribute__((aligned(4096)));  // F1 guard: X page,
+// last word +4088 = div, +4092 = nop; page ABOVE stays unmapped
+uint32_t pgX2[1024] __attribute__((aligned(4096)));  // F6 guard A page (l0a[13]):
+// w0-2 remap l0a[14], w3-1022 nop, w1023 sfence; FALL-THROUGH to VA_XO
+uint32_t pgXO[8]   __attribute__((aligned(4096)));   // F6 old B content (l0a[14])
+uint32_t pgXN2[8]  __attribute__((aligned(4096)));   // F6 new B content
 
 static volatile uint32_t g_abort;   // U-abort / ebreak exit target
 
@@ -172,6 +183,13 @@ void m_hnd_c(void)
         csr_set(CSR_MSTATUS, MS_MPP_M);
     } else {                            // 8 (U ecall) / 12,13,15 (MPRV): +4
         csr_write(CSR_MEPC, e + 4);     // MPP holds the trapped mode already
+        if (c == 12 || c == 13 || c == 15)
+            csr_clear(CSR_MSTATUS, MS_MPRV);
+        // F9 note: mret with MPP==M (trap taken in M) does NOT clear MPRV
+        // (spec 3.1.6.1: "if y != M, xRET also sets MPRV=0") and forces
+        // MPP<-U, so a left-set MPRV would translate ALL subsequent M-mode
+        // accesses as U -> fault storm. The battery re-arms via mprs() per
+        // item, so the handler drops MPRV here instead.
     }
 }
 
@@ -225,6 +243,38 @@ static uint32_t call_va(uint32_t va)
     return f();
 }
 
+// F1 guard helper: load t0/t1 (divisor != 0, not the special-case path)
+// immediately before the jump so the divider runs when the page-crossing
+// fetch's faulted walk response arrives mid-stall.
+static uint32_t call_va_div(uint32_t va) __attribute__((noinline));
+static uint32_t call_va_div(uint32_t va)
+{
+    uint32_t r;
+    asm volatile("li   t0, 0x40000000\n\t"
+                 "li   t1, 7\n\t"
+                 "jalr ra, %1, 0\n\t"
+                 "mv   %0, t2\n\t"
+                 : "=&r"(r) : "r"(va) : "ra", "t0", "t1", "t2");
+    return r;
+}
+
+// F6 guard helper: a6 carries PA(l0a) (identity-mapped) for the blob's PTE
+// store at offset 14*4 = 56; jump target in t2 (blob clobbers a5/a6 only).
+// Blob's own fall-through page B (VA_XO) rets straight back to us, so the
+// value read into a0 after `ret` proves WHICH mapping was fetched.
+static uint32_t call_f6(uint32_t l0a_pa, uint32_t va2) __attribute__((noinline));
+static uint32_t call_f6(uint32_t l0a_pa, uint32_t va2)
+{
+    uint32_t r;
+    asm volatile("mv   a6, %1\n\t"
+                 "mv   t2, %2\n\t"
+                 "jalr ra, t2, 0\n\t"
+                 "mv   %0, a0\n\t"
+                 : "=&r"(r) : "r"(l0a_pa), "r"(va2)
+                 : "ra", "t2", "a0", "a5", "a6", "memory");
+    return r;
+}
+
 // ============================================================ setup (M)
 static void build_tables(void)
 {
@@ -256,6 +306,9 @@ static void build_tables(void)
     l0a[8]  = mkpte(PPN(pgG1), F_V | F_R | F_W | F_X | F_A | F_D | F_G);  // global
     l0a[9]  = mkpte(PPN(pgNL), F_V | F_A);                                // nonleaf+A
     l0a[10] = mkpte(PPN(pgNL), F_V | F_W | F_A | F_D);                    // R=0,W=1
+    l0a[11] = mkpte(PPN(pgXN), F_V | F_X | F_A | F_D);  // F1 guard code page
+    l0a[13] = mkpte(PPN(pgX2), F_V | F_X | F_A | F_D);  // F6 guard blob page
+    l0a[14] = mkpte(PPN(pgXO), F_V | F_X | F_A | F_D);  // F6: blob remaps it
 
     // l0b / l0b1: alias + sfence + asid batteries
     l0b[1]  = mkpte(PPN(pgB),  F_V | F_R | F_W | F_A | F_D);
@@ -280,7 +333,8 @@ static void build_tables(void)
     for (i = 0; i < 11; i++) pgUC[i] = uc_blob[i];
 }
 
-// re-arm MPRV with MPP=S (trap entry clobbers MPP, mret clears MPRV)
+// re-arm MPRV with MPP=S before each battery item (trap entry clobbers
+// MPP; m_hnd_c clears MPRV for the 12/13/15 records -- mret MPP==M keeps it)
 static void mprs(void)
 {
     csr_write(CSR_MSTATUS,
@@ -412,15 +466,56 @@ static void s_main(void)
              dram[22] == VA_RF && dram[23] == VA_RF);
     (void)v;
 
+    // ---- F1/F1b guard (session 23 review): fetch fault arriving DURING a
+    // divider stall. div at pgXN+0xFF8 stalls EX ~34 cycles; the next-page
+    // (unmapped) walk's faulted response lands inside that window. Old RTL:
+    // req_l1/req_mmu un-gated by !t_fault -> cache read of the faulted PA,
+    // response enqueued as a normal insn, cause-12 marker LOST. Fixed RTL:
+    // fetch pauses; the marker reaches the pipe when the stall lifts.
+    pgXN[1022] = 0x0262C3B3u;                              // div t2,t0,t1 (tools)
+    pgXN[1023] = 0x00000013u;                              // nop (executes)
+    v = call_va_div(VA_XN + 0xFF8u);                       // fault at +0x1000
+    chk(54, dram[20] == n0 + 8 && dram[21] == 12 &&
+             dram[22] == VA_XN + 0x1000u && dram[23] == VA_XN + 0x1000u);
+    (void)v;
+
+    // ---- F6 guard (session 23 review): fetch runs several insns AHEAD of
+    // MA retire, so by the time a page-BOUNDARY SFENCE.VMA commits, the
+    // just-remapped NEXT page already sits in the fetch FIFO (translated
+    // via the old TLB entry during the blob's nop run). Old RTL: no
+    // refetch -> stale pgXO (li a0,1) executed. Fixed RTL: sfence
+    // self-redirects to pc+4, FIFO drains, pgXN2 (li a0,2) is re-walked.
+    {
+        uint32_t npe = (PPN(pgXN2) << 10) | (F_V | F_X | F_A | F_D);
+        uint32_t hi12 = (npe + 0x800u) >> 12;
+        uint32_t n1, k;
+        int32_t  lo12 = ((int32_t)(npe << 20)) >> 20;   // sign-extended imm
+        pgX2[0] = (hi12 << 12) | (15u << 7) | 0x37u;    // lui a5, hi(npe)
+        pgX2[1] = ((((uint32_t)lo12) & 0xFFFu) << 20) | (15u << 15)
+                  | (15u << 7) | 0x13u;                 // addi a5, a5, lo(npe)
+        pgX2[2] = 0x02F82C23u;                          // sw a5,56(a6) [tools;
+        // a6=x16! earlier hand-pick x14 was WRONG (a6!=x14)]
+        for (k = 3; k < 1023; k++) pgX2[k] = 0x00000013u;
+        pgX2[1023] = 0x12000073u;                       // sfence.vma x0,x0
+        pgXO[0]  = 0x00100513u; pgXO[1]  = 0x00008067u; // li a0,1; ret
+        pgXN2[0] = 0x00200513u; pgXN2[1] = 0x00008067u; // li a0,2; ret
+        v = call_va(VA_XO);
+        chk(55, v == 1u);                               // old mapping, TLB warm
+        n1 = dram[20];
+        v = call_f6((uint32_t)l0a, VA_X2);              // remap+sfence+f/s
+        chk(56, v == 2u && dram[20] == n1);             // refetched post-sfence
+        (void)v;
+    }
+
     // ---- structural faults ----
     v = rd32(VA_BDM);                                      // 4M PPN[9:0]!=0 -> 13
-    chk(30, dram[20] == n0 + 8 && dram[21] == 13 && dram[22] == VA_BDM);
+    chk(30, dram[20] == n0 + 9 && dram[21] == 13 && dram[22] == VA_BDM);
     (void)v;
     v = rd32(VA_NL);                                       // nonleaf+A -> 13
-    chk(31, dram[20] == n0 + 9 && dram[21] == 13 && dram[22] == VA_NL);
+    chk(31, dram[20] == n0 + 10 && dram[21] == 13 && dram[22] == VA_NL);
     (void)v;
     v = rd32(VA_R0W1);                                     // R=0,W=1 -> 13
-    chk(32, dram[20] == n0 + 10 && dram[21] == 13 && dram[22] == VA_R0W1);
+    chk(32, dram[20] == n0 + 11 && dram[21] == 13 && dram[22] == VA_R0W1);
     (void)v;
 
     // ---- sfence page-specific (pair VA_AL1 / VA_AL6) ----

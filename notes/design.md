@@ -49,7 +49,8 @@ Register map (per spec ch.3):
   +0x000000  reserved (src 0)
   +0x000004  source 1 priority ... +0x00003C source 16 priority  (4B stride)
   +0x001000  pending word 0 = sources 1..31 bits (bit N = src 32k+N) [16 src -> 1 word]
-  +0x002000  enables ctx0: word0 = src 1..31 (16 bits used)
+  +0x002000  enables ctx0: word0 = src 1..31 (16 bits used; bit 0 = src 0
+             does not exist -> hardwired 0, spec ch.6)
   +0x002080  enables ctx1 (same layout)            (ctx stride 0x80, 2 words each)
   +0x200000  threshold ctx0   +0x201000 threshold ctx1
   +0x200004  claim/complete ctx0  +0x201004 claim/complete ctx1
@@ -65,9 +66,9 @@ Notification: eip_m -> hart meip, eip_s -> hart seip (mip/sip bits), 1 bit each.
 
 ## 4. CLINT (base 0x0200_0000)
 
-  0x0000  msip[0]  (bit 0 = hart 0)
-  0x0004  sstip[0] (bit 0 = hart 0)   [extension]
-  0x7000  mtip[0]  (bit 0 = hart 0)
+  0x0000  msip[0]  (bit 0 = hart 0; bits 31:1 read 0 - priv 3.2 flag format)
+  0x0004  sstip[0] (bit 0 = hart 0; same bit format)   [extension]
+  0x7000  mtip[0]  (bit 0 = hart 0; same bit format)
   0x4000  mtimecmp[0] low, 0x4004 high (64-bit)
   0x4004+0x8=0x400C? -> stimecmp[0] low 0x400C? NO: standard: mtimecmp i at 0x4000+i*8,
          stimecmp i at 0x4004+i*8. So: mtimecmp 0x4000/0x4004, stimecmp 0x4004/0x4008.
@@ -156,15 +157,26 @@ Interrupts/traps (checked at MA, commit boundary, in-order):
   Delegation: mideleg bit(c) -> S-mode: scause/sepc/stval; else M: mcause/mepc/mtval.
   Interrupts: pending = (mip/mie & mstatus.MIE) for M, (sip/sie & sstatus.SIE) for S.
   mstatus.MIE gates all; sstatus.SIE gates S-context only. Priority M>S.
+  Interrupt CAUSE code = highest-priority set bit of mie&mip[&mideleg sel]
+  (priv 3.1.9: M-destined MEI11>MSI3>MTI7>SEI9>SSI1>STI5; S-destined
+  SEI9>SSI1>STI5; this hart: bits 11/9 pins + 1 CSR) — session 23 review.
   On trap: save epc/mcause/mtval, set xie=0, pc = xtvec (direct only; vectored not
-  implemented -> mtvec.MODE=0 always; vectored = reserved->trap to 0? we set MODE=0 only,
-  writes with MODE=1 ignored).
+  implemented -> mtvec/stvec write forces MODE[1:0]=00; trap vector uses
+  BASE[31:2]).
   mret/sret: pc=xepc, xie=1, xpp=cur mode, cur=xpp, sstatus/sie etc per spec.
+  MPRV: cleared when xRET's target y != M (mret MPP=M keeps MPRV; sret always
+  clears since SPP<M). mstatus bit 9 (SPV, H-ext) WPRI -> read-only 0 (not
+  writable; masks: MSTATUS_WMASK 0x000e19aa, SSTATUS 0x000c0122).
+  sip(0x144).SSIP writable when mideleg[1]=1 (priv 5.1); sie(0x104) aliases
+  mie&mideleg. CSRRS/CSRRC write-attempt keyed on rs1 FIELD != x0 (unpriv
+  6.1: value 0 in a real register still writes -> RO write still traps);
+  CSRRSI/CSRRCI: uimm=0 no write; SYSTEM f3=100/111 reserved -> illegal.
   wfi = nop.
 
 MMU (Sv32; spec 12.3, satp 12.1.11; addresses verified by tools/mmu_addr.py):
   satp (RV32): MODE[31] ASID[30:22](9b WARL, ASIDLEN=9) PPN[21:0].
     Table 40 (SXLEN=32): MODE 0=Bare, 1=Sv32. Bare: write satp=0.
+    PPN[21:20] WARL 0: platform PA space is 32-bit; satp write masks them.
   Translation active ONLY in S/U mode; M-mode: always identity (pa=va), no MMU fault
     (spec 12.3.2 step 1: "satp must be active, i.e. effective mode S or U").
     MPRV handled at core (effective mode in = MPRV ? MPP : mode).
@@ -173,7 +185,10 @@ MMU (Sv32; spec 12.3, satp 12.1.11; addresses verified by tools/mmu_addr.py):
     L1 PTE addr = satp.ppn*4096 + VA[31:22]*4; L0 PTE addr = L1.pte.ppn*4096 + VA[21:12]*4.
     PA = 34b: PPN[1]=PA[33:22] (12b, from PTE[31:20]), PPN[0]=PA[21:12] (10b, from
     PTE[19:10]); PA[11:0]=VA[11:0]. SoC wires PA[31:0];
-    PPN[21:20]!=0 -> PTE addr escapes 32b SoC -> null read 0 -> v=0 fault (documented).
+    PPN[21:20]!=0 -> derived PTE addr / leaf PA escapes the 32b SoC bus:
+    the walker FAULTS directly (root: satp guard + CSR WARL mask; any PTE
+    with PPN[21:20]!=0 -> structural page fault, no continue, no fill).
+    NEVER truncate-and-wrap (would alias real memory; session 23 review F11).
     4K leaf: PA[31:12] = {PPN1[9:0], PPN0[9:0]}; 4M leaf: PA[31:0] = PPN1[9:0]<<22 | VA[21:0].
   PTE bits (Fig 67): V[0] R[1] W[2] X[3] U[4] G[5] A[6] D[7] RSW[9:8] PPN0[19:10] PPN1[31:20].
     validity: v=0 fault; r=0&w=1 fault; non-leaf (r=x=0): d/a/u must be 0 else fault;
@@ -201,8 +216,14 @@ MMU (Sv32; spec 12.3, satp 12.1.11; addresses verified by tools/mmu_addr.py):
     the two walkers share WB port m2 via a core grant handshake
     (GRANT_I/WANT_O/BUSY_O, D-priority): an ungranted walk-start latches
     (pend) in the mmu -> at most one STB on m2 any cycle.
-    satp write: no auto-flush (SFENCE.VMA does it). sf_all (rs1=rs2=0),
-    sf_asid (rs2!=0; G entries survive asid flush, killed by sf_all).
+    satp write: no auto-flush (SFENCE.VMA does it). Classification keys on
+    rs FIELDS (spec 12.1.7.5), not values: sf_all (rs1=rs2=x0),
+    sf_asid (rs1=x0, rs2!=x0 FIELD; G entries survive even if rs2 holds 0),
+    sf_page (rs1!=x0 FIELD). SFENCE.VMA is S+ privilege (U-mode attempt:
+    illegal, NO flush) and on commit self-redirects fetch to pc+4 (flush
+    drains FIFO/in-flight like fence.i, no I$ INVAL): the ordering
+    guarantee covers implicit refs of SUBSEQUENT instructions, so
+    pre-sfence fetches must refetch (F6, F17).
   Page sizes: 4K / 4M only (Sv32 LEVELS=2; no 1G in Sv32).
   Walk latency (1cyc slave), IMPLEMENTED (tb M1-M13): hit = 1 cyc; 4M miss = 3;
   4K miss = 5. DONE presented the cycle the last PTE ACK lands (S_R/S_RESP

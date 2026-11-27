@@ -1,5 +1,78 @@
 # progress
 
+## 2026-11-27 (session 23)
+- FULL RTL REVIEW for correctness/spec-conformance (all rtl/*.v vs specs/
+  text extracts). Findings + spec citations in notes/review.md (F1..F16);
+  fixes landed, suite re-run pending record below.
+- REAL BUGS fixed (core.v):
+  (F1) req_l1 had NO !t_fault gate: a faulted translation arriving while
+    stall=1 or FIFO-space-limited (syn needs !stall) issued a cache READ of
+    the faulted PA -> response enqueued as a NORMAL insn -> cause-12 fetch
+    fault silently lost, garbage executed. Same 1-ahead invariant as the
+    t05 inval_p lesson.
+  (F6) SFENCE.VMA never refetched younger pre-sfence fetches -> stale
+    mapping could execute (spec ordering = implicit refs of SUBSEQUENT
+    instrs; priv.txt 11994/12067). Now self-redirects to pc+4 (no I$
+    INVAL - PA-keyed lines stay valid, TLB re-walks).
+  (F5) U-mode SFENCE.VMA executed + flushed instead of trapping illegal.
+  (F-companion) fence.i/sfence are no longer interrupt points: old code
+    let int_fire coincide -> commit suppressed while epc=pc+4 SKIPPED the
+    fence (session-22 "re-executes" comment was wrong; interrupts never
+    rewind epc). fence_commit gates int_fire.
+  (F2) interrupt cause hardcoded 0x8000_000B/0x8000_0009; now picked from
+    the pending vector with spec priority (M: MEI11>MSI3>MTI7>SEI9>SSI1>
+    STI5; S: SEI9>SSI1>STI5). Non-delegated SSIP -> mcause=1; sip-driven
+    SSI -> scause=1. Pins-only paths (all current tests) unchanged 11/9.
+  (F3) CSRRS/CSRRC write-attempt keyed on rs1 VALUE -> csrrs rd,RO,x5 with
+    x5=0 wrongly legal. Now rs1 FIELD != x0 (unpriv 6.1 Table 7).
+  (F4) SYSTEM f3=111 decoded as CSRRCI -> reserved -> illegal.
+  (F7) mtvec/stvec kept bit1 of MODE -> MODE=2/3 storable; force [1:0]=0.
+  (F8) mstatus bit9 (SPV/WPRI) writable -> must be read-only 0 (priv 2.3.1);
+    MSTATUS_WMASK 0xe1baa->0xe19aa, SSTATUS 0xc0322->0xc0122.
+  (F9) xRET MPRV: mret must clear ONLY when MPP!=M (was always); sret must
+    ALWAYS clear (y=SPP<M; was never).
+  (F10) sip (0x144) write case missing -> S-mode could not write SSIP.
+  (F12) satp PPN[21:20] WARL-masked to 0 on write (32-bit PA platform).
+- mmu.v (F11): PPN[21:20]!=0 TRUNCATED (a1/a2c/leaf PA) -> wrapped into
+  real memory (could build bogus mappings). Now faults: satp REQ guard +
+  PTE decode (w1_bad/r_bad_i) -> page fault, no walk, no fill. Design
+  intent was already escape->fault; RTL wrapped.
+- plic.v (F13): enable bit0 hardwired 0 (spec ch.6). t05 chk72 updated.
+- clint.v (F14): msip/sstip/mtip bits 31:1 read 0 (priv 3.2 msip bit
+  format). tb_clint group 11 retargeted (unaligned/lane-merge onto the
+  mtimecmp pair, bit0-format checks added).
+- wb_rom/wb_ram (F15): ACK_O/DAT_O now reset (WB B4 3.1.1 defined state;
+  rst port was unused).
+- LATE-DAY finds (surfaced by t04 guards):
+  (F17) sf_typ classified sfence from OPERAND VALUES; spec 12.1.7.5 keys on
+    rs FIELDS: `sfence.vma x0, xN` with xN=0 is an ASID-0 fence (G
+    survives), old RTL treated it as sf_all. Baseline t04 chk38 passed only
+    via a dirty-PTE writeback-timing accident (re-walk saw the stale l0a[8]
+    line). Fixed in core.v; t04 chk38 now genuinely exercises it.
+  (F18) req_mmu could issue while a flush-killed walk was STILL IN FLIGHT
+    (mio cleared by flush, mmu.v drops REQ during a walk) -> request lost,
+    fpc advanced -> HOLE: instruction never fetched (observed: s_shim
+    entered at +4, auipc skipped, handler t2 garbage). Added !d_mio gate
+    (symmetric to D-side !d_md). Unmasked by the F1b held-fault pause.
+  t04 NEW GUARDS: chk54 (F1: div stall + boundary fetch fault), chk55/56
+    (F6: page-boundary sfence + fall-through into REMAPPED next page ->
+    stale FIFO insn must be refetched; blob encodings tool-verified,
+    a6=x16 lesson learned), s_n expectations shifted +1 (chk30-32).
+- tools/emu32.py updated IN LOCKSTEP (F2,F3,F4,F7,F8,F9,F10,F12 + mip/sip
+  reads now include pins (emulated model diverged from RTL) + sfence U
+  illegal). core(54)/c8(34) goldens regenerate + PASS.
+- verilator lint: 0 UNOPTFLAT/circular (F1..F6 add no comb loops;
+  fence_commit/int_fire/fi_now are mutually exclusive by construction).
+- reviewed-CLEAN (no change): wb_ic grant/pop/return, wb_ic_mfifo races,
+  fetch pav/lio/discard algebra, forwarding chains (d=1..3 + lf/cs),
+  divider FSM+abort, TLB fill victim policy, sf-pending vs fill, m2
+  grant arbiter, MMU perms/A-D/Svade, PLIC gateway/claim/complete,
+  16550 lane-gated decode + trigger irqs.
+- suite (final RTL): mmu l1_i l1_d wb_ic 16550 clint plic core c8 GREEN;
+  t01..t05 + soc GREEN (fill results after re-run) + lint clean.
+- next: dhrystone (sec.10 F), C8-Sv32 on-core, synth yosys->nextpnr-ecp5->
+  ecppack, board lpf, README.
+
 ## 2026-11-27 (session 22)
 - t05 SoC/interconnect battery GREEN (94 checks) + fence.i/Zifencei RTL
   landed (session-21 WIP closed). FULL SUITE GREEN (13 targets).

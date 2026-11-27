@@ -28,8 +28,11 @@ module wb_ram #(
 
     reg [31:0] mem [0:DEPTH-1];
 
-    always @(posedge clk) begin
-        if (STB_I) begin
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin           // WB B4 3.1.1: defined post-reset state (F15)
+            ACK_O <= 1'b0;
+            DAT_O <= 32'h0;
+        end else if (STB_I) begin
             if (WE_I) begin
                 if (SEL_I[0]) mem[idx][7:0]   <= DAT_I[7:0];
                 if (SEL_I[1]) mem[idx][15:8]  <= DAT_I[15:8];

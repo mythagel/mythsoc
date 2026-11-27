@@ -228,36 +228,51 @@ module tb_clint;
         if (b64 - a64 !== 64'd3) err("mtime: write disturbed");
         else                     ok("mtime: write ignored");
 
-        // --- 11. LW/SW aligned + unaligned + byte lanes
+        // --- 11. bit-format regs + aligned/unaligned + byte lanes
+        // msip/sstip/mtip are per-hart-FLAG registers: bits 31:1 read 0,
+        // bit 0 = flag (priv 3.2 msip format; review F14). The full-width
+        // merge paths are exercised on mtimecmp/stimecmp (real 32-bit regs).
         wb_wr(32'h0200_0000, 32'hA5C3_F00D, 4'b1111);
-        wb_wr(32'h0200_0004, 32'h1122_3344, 4'b1111);
+        wb_wr(32'h0200_0004, 32'h1122_3345, 4'b1111);
         wb_rd(32'h0200_0000, 4'b1111, w);
-        if (w !== 32'hA5C3_F00D) err("lw/sw: msip rdata");
-        else                     ok("lw/sw: msip round trip");
+        if (w !== 32'h1) err("bitfmt: msip rdata");
+        else                     ok("bitfmt: msip bits31:1 read 0");
         wb_rd(32'h0200_0004, 4'b1111, w);
-        if (w !== 32'h1122_3344) err("lw/sw: sstip rdata");
-        else                     ok("lw/sw: sstip round trip");
-        // unaligned LW at +1: {sstip[7:0], msip[31:8]}
-        wb_rd(32'h0200_0001, 4'b1111, w);
-        if (w !== 32'h44A5_C3F0) err("unaligned: LW rdata");
-        else                     ok("unaligned: LW rdata");
-        // unaligned SW at +1: msip <- {D[23:0] bytes, old byte0}, sstip[7:0] <- D[31:24]
-        wb_wr(32'h0200_0001, 32'h0D0C_0B0A, 4'b1111);
+        if (w !== 32'h1) err("bitfmt: sstip rdata");
+        else                     ok("bitfmt: sstip bits31:1 read 0");
+        wb_wr(32'h0200_0000, 32'hFFFF_FFFE, 4'b1111);
         wb_rd(32'h0200_0000, 4'b1111, w);
-        if (w !== 32'h0C0B_0A0D) err("unaligned: msip after SW");
-        else                     ok("unaligned: msip after SW");
-        wb_rd(32'h0200_0004, 4'b1111, w);
-        if (w !== 32'h1122_330D) err("unaligned: sstip after SW");
-        else                     ok("unaligned: sstip after SW");
-        // byte-lane reads: data lands in lane b of the word (DAT[8b+7:8b])
-        wb_rd(32'h0200_0000, 4'b0001, w); if (w[7:0] !== 8'h0D) err("lane: b0");
-        wb_rd(32'h0200_0000, 4'b0010, w); if (w[15:8] !== 8'h0A) err("lane: b1");
-        wb_rd(32'h0200_0000, 4'b0100, w); if (w[23:16] !== 8'h0B) err("lane: b2");
-        wb_rd(32'h0200_0000, 4'b1000, w); if (w[31:24] !== 8'h0C) err("lane: b3");
-        ok("lane: byte reads");
-        // clear
-        wb_wr(32'h0200_0000, 32'h0, 4'b1111);
+        if (w !== 32'h0 || ip_msw) err("bitfmt: msip bit0 low");
+        else                     ok("bitfmt: msip bit0 follows lane");
+        if (!ip_ssw) err("bitfmt: sstip ip lost");
+        else                     ok("bitfmt: sstip ip kept");
         wb_wr(32'h0200_0004, 32'h0, 4'b1111);
+        // mtimecmp pair (0x4000 lo / 0x4004 hi+stc-lo overlap)
+        wb_wr(32'h0200_4000, 32'h1234_5678, 4'b1111);
+        wb_wr(32'h0200_4004, 32'h9ABC_DEF0, 4'b1111);
+        // unaligned LW at +0x4001: {mtc_hi[7:0], mtc_lo[31:8]}
+        wb_rd(32'h0200_4001, 4'b1111, w);
+        if (w !== 32'hF012_3456) err("unaligned: LW rdata");
+        else                     ok("unaligned: LW rdata");
+        // unaligned SW at +0x4001 (D=0x0D0C_0B0A): lo bytes1-3 <- D[23:0],
+        // lo byte0 kept; hi/stc_lo byte0 <- D[31:24]=0x0D (overlap pair)
+        wb_wr(32'h0200_4001, 32'h0D0C_0B0A, 4'b1111);
+        wb_rd(32'h0200_4000, 4'b1111, w);
+        if (w !== 32'h0C0B_0A78) err("unaligned: mtc_lo after SW");
+        else                     ok("unaligned: mtc_lo after SW");
+        wb_rd(32'h0200_4004, 4'b1111, w);
+        if (w !== 32'h9ABC_DE0D) err("unaligned: mtc_hi after SW");
+        else                     ok("unaligned: mtc_hi after SW");
+        // byte-lane reads: data lands in lane b of the word (DAT[8b+7:8b])
+        wb_rd(32'h0200_4000, 4'b0001, w); if (w[7:0] !== 8'h78) err("lane: b0");
+        wb_rd(32'h0200_4000, 4'b0010, w); if (w[15:8] !== 8'h0A) err("lane: b1");
+        wb_rd(32'h0200_4000, 4'b0100, w); if (w[23:16] !== 8'h0B) err("lane: b2");
+        wb_rd(32'h0200_4000, 4'b1000, w); if (w[31:24] !== 8'h0C) err("lane: b3");
+        ok("lane: byte reads");
+        // clear / restore no-pending compare state
+        wb_wr(32'h0200_0000, 32'h0, 4'b1111);
+        wb_wr(32'h0200_4004, 32'hFFFF_FFFF, 4'b1111);
+        wb_wr(32'h0200_4000, 32'hFFFF_FFFF, 4'b1111);
         repeat (2) @(posedge clk);
         if (ip_msw || ip_ssw) err("lane: ip left high");
         else                  ok("lane: ip cleared");

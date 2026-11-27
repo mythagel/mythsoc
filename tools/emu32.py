@@ -52,7 +52,7 @@ def run(words, start_pc, verbose=False, arm_m=-1, arm_s=-1, pt=None):
          'mtvec': 0, 'mscratch': 0, 'mepc': 0, 'mcause': 0, 'mtval': 0,
          'stvec': 0, 'sscratch': 0, 'sepc': 0, 'scause': 0, 'stval': 0,
          'satp': 0, 'stimecmp': 0xFFFFFFFF, 'ssip': 0}
-    MMSK, SMSK = 0x000e1baa, 0x000c0322
+    MMSK, SMSK = 0x000e19aa, 0x000c0122      # WPRI bit9 RO0 (review F8)
     DELEGS, DELEGW, MIEM = 0x0000b7ff, 0x00000222, 0x00000aaa
     pc = start_pc
     n = 0
@@ -63,11 +63,11 @@ def run(words, start_pc, verbose=False, arm_m=-1, arm_s=-1, pt=None):
                 0x303: P['mideleg'], 0x304: P['mie'] & MIEM, 0x305: P['mtvec'],
                 0x340: P['mscratch'], 0x341: P['mepc'], 0x342: P['mcause'],
                 0x343: P['mtval'],
-                0x344: (0x800 if False else 0) | (0x200 if False else 0) | (2 * P['ssip']),
+                0x344: mip_now(),
                 0x100: m & SMSK, 0x104: P['mie'] & P['mideleg'],
                 0x105: P['stvec'], 0x140: P['sscratch'], 0x141: P['sepc'],
                 0x142: P['scause'], 0x143: P['stval'],
-                0x144: (P['ssip'] * 2) & P['mideleg'],
+                0x144: mip_now() & P['mideleg'],
                 0x14D: P['stimecmp'], 0x15D: 0, 0x180: P['satp']}.get(a, None)
 
     def csr_write(a, v):
@@ -80,7 +80,7 @@ def run(words, start_pc, verbose=False, arm_m=-1, arm_s=-1, pt=None):
         elif a == 0x302: P['medeleg'] = v & DELEGS
         elif a == 0x303: P['mideleg'] = v & DELEGW
         elif a == 0x304: P['mie'] = v & MIEM
-        elif a == 0x305: P['mtvec'] = v & ~1
+        elif a == 0x305: P['mtvec'] = v & ~3
         elif a == 0x340: P['mscratch'] = v
         elif a == 0x341: P['mepc'] = v & ~1
         elif a == 0x342: P['mcause'] = v
@@ -89,14 +89,14 @@ def run(words, start_pc, verbose=False, arm_m=-1, arm_s=-1, pt=None):
         elif a == 0x100:
             P['mstatus'] = (P['mstatus'] & ~SMSK) | (v & SMSK)
         elif a == 0x104: P['mie'] = (P['mie'] & ~P['mideleg']) | (v & P['mideleg'])
-        elif a == 0x105: P['stvec'] = v & ~1
+        elif a == 0x105: P['stvec'] = v & ~3
         elif a == 0x140: P['sscratch'] = v
         elif a == 0x141: P['sepc'] = v & ~1
         elif a == 0x142: P['scause'] = v
         elif a == 0x143: P['stval'] = v
         elif a == 0x144: P['ssip'] = (P['ssip'] & ~(P['mideleg'] >> 1 & 1)) | ((v >> 1) & P['mideleg'] >> 1 & 1)
         elif a in (0x14D, 0x15D): P['stimecmp'] = v if a == 0x14D else P['stimecmp']
-        elif a == 0x180: P['satp'] = v
+        elif a == 0x180: P['satp'] = v & ~0x300000
 
     def trap(cause, tval):
         to_s = P['priv'] != 3 and ((P['medeleg'] >> cause) & 1)
@@ -145,9 +145,9 @@ def run(words, start_pc, verbose=False, arm_m=-1, arm_s=-1, pt=None):
     def mip_now():
         return 0x800 * pins['m'] | 0x200 * pins['s'] | 2 * P['ssip']
 
-    def int_deliver(which, epc):
+    def int_deliver(which, epc, cause):
         if which == 'm':
-            P['mepc'] = epc & ~1; P['mcause'] = 0x8000000B; P['mtval'] = 0
+            P['mepc'] = epc & ~1; P['mcause'] = cause; P['mtval'] = 0
             m = P['mstatus']
             P['mstatus'] = (m & ~0x1800) | (P['priv'] << 11)
             P['mstatus'] = (P['mstatus'] | (1 << 7)) if ((m >> 3) & 1) \
@@ -156,7 +156,7 @@ def run(words, start_pc, verbose=False, arm_m=-1, arm_s=-1, pt=None):
             P['priv'] = 3
             return P['mtvec'] & ~3
         else:
-            P['sepc'] = epc & ~1; P['scause'] = 0x80000009; P['stval'] = 0
+            P['sepc'] = epc & ~1; P['scause'] = cause; P['stval'] = 0
             m = P['mstatus']
             P['mstatus'] = (m & ~(1 << 8)) | ((P['priv'] & 1) << 8)
             P['mstatus'] = (P['mstatus'] & ~((1 << 5) | (1 << 1))) | (((m >> 1) & 1) << 5)
@@ -183,6 +183,15 @@ def run(words, start_pc, verbose=False, arm_m=-1, arm_s=-1, pt=None):
         g_m = P['priv'] != 3 or ((P['mstatus'] >> 3) & 1)
         g_s = P['priv'] == 0 or (P['priv'] == 1 and ((P['mstatus'] >> 1) & 1))
         icand = 'm' if (mp and g_m) else ('s' if (sp and g_s) else None)
+        # cause = highest-priority pending bit (priv 3.1.9: M-destined
+        # MEI>MSI>MTI>SEI>SSI>STI; S-destined SEI>SSI>STI) -- review F2
+        icause = 0
+        if icand == 'm':
+            icause = 0x80000000 | (11 if mp & 0x800 else 3 if mp & 8 else
+                                   7 if mp & 0x80 else 9 if mp & 0x200 else
+                                   1 if mp & 2 else 5)
+        elif icand == 's':
+            icause = 0x80000000 | (9 if sp & 0x200 else 1 if sp & 2 else 5)
         fok, fpa = xlate(pc, 'fetch')
         if not fok:
             n += 1
@@ -235,16 +244,18 @@ def run(words, start_pc, verbose=False, arm_m=-1, arm_s=-1, pt=None):
                 pc = trap(3, pc); n += 1; continue
             if f7 == 2 and rs2 == 5:                  # WFI = nop
                 n += 1; pc = (pc + 4) & MASK; continue
-            elif f7 == 9:                             # SFENCE.VMA = nop (C5)
+            elif f7 == 9:                             # SFENCE.VMA (F5)
+                if P['priv'] < 1: pc = illegal(); n += 1; continue
                 n += 1; pc = (pc + 4) & MASK; continue
             elif f7 == 0x18 and rs2 == 2:             # MRET
                 if P['priv'] != 3: pc = illegal(); n += 1; continue
                 m = P['mstatus']
-                P['priv'] = (m >> 11) & 3
+                y = (m >> 11) & 3
+                P['priv'] = y
                 P['mstatus'] = (m & ~(1 << 3)) | (((m >> 7) & 1) << 3)
                 P['mstatus'] |= 1 << 7
                 P['mstatus'] &= ~0x1800
-                P['mstatus'] &= ~(1 << 17)
+                if y != 3: P['mstatus'] &= ~(1 << 17)  # F9: clear iff y != M
                 pc = P['mepc'] & ~1; n += 1; continue
             elif f7 == 8 and rs2 == 2:                # SRET
                 if P['priv'] < 1: pc = illegal(); n += 1; continue
@@ -254,10 +265,13 @@ def run(words, start_pc, verbose=False, arm_m=-1, arm_s=-1, pt=None):
                 P['mstatus'] = (m & ~(1 << 1)) | (((m >> 5) & 1) << 1)
                 P['mstatus'] |= 1 << 5
                 P['mstatus'] &= ~(1 << 8)
+                P['mstatus'] &= ~(1 << 17)             # F9: sret y=SPP < M
                 pc = P['sepc'] & ~1; n += 1; continue
             else:
                 pc = illegal(); n += 1; continue
-        elif op == 0x73:                              # CSR (f3 != 0)
+        elif op == 0x73 and f3 in (4, 7):             # reserved f3 (F4)
+            pc = illegal(); n += 1; continue
+        elif op == 0x73:                              # CSR (f3 1/2/3/5/6)
             addr = (insn >> 20) & 0xFFF
             need = (addr >> 8) & 3
             pvok = need == 0 or (need == 1 and P['priv'] >= 1) or (need >= 2 and P['priv'] == 3)
@@ -265,9 +279,11 @@ def run(words, start_pc, verbose=False, arm_m=-1, arm_s=-1, pt=None):
             if old is None or not pvok:
                 pc = illegal(); n += 1; continue
             src = (insn >> 15) & 31 if (f3 & 4) else a
+            rs1f = (insn >> 15) & 31   # FIELD, not value (F3)
             ro = (addr >> 10) == 3 or addr in (0x301, 0xF11, 0xF12,
                                                0xF13, 0xF14, 0xF15)
-            wr = (f3 in (1, 5)) or (src != 0)         # RW always; RS/RC iff src
+            wr = (f3 in (1, 5) or ((f3 & 4) and src != 0)
+                  or (not (f3 & 4) and rs1f != 0))    # F3 field rule
             if ro and wr:
                 pc = illegal(); n += 1; continue      # write to RO = illegal
             w = old
@@ -277,7 +293,7 @@ def run(words, start_pc, verbose=False, arm_m=-1, arm_s=-1, pt=None):
             rf[rd] = 0 if rd == 0 else (w & MASK)
             n += 1
             if icand:
-                pc = int_deliver(icand, pc + 4); continue
+                pc = int_deliver(icand, pc + 4, icause); continue
             pc = (pc + 4) & MASK; continue
 
         w = None
@@ -366,7 +382,7 @@ def run(words, start_pc, verbose=False, arm_m=-1, arm_s=-1, pt=None):
             rf[rd] = 0 if rd == 0 else (w & MASK)
         n += 1
         if icand and (nxt & MASK) == ((pc + 4) & MASK):
-            pc = int_deliver(icand, pc + 4)
+            pc = int_deliver(icand, pc + 4, icause)
             continue
         if verbose:
             print("%#010x: %#010x  x%d=%#010x prv=%d" % (pc, insn, rd, rf[rd], P['priv']),

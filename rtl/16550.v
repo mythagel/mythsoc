@@ -1,6 +1,8 @@
 // u16550 -- 16550-compatible UART, Wishbone B4 slave.  (mythrv32)
 //
-// Registers (byte offset = ADR[5:3] mod 8; a LW/SW transfers 4 registers):
+// Registers at byte offset ADR[2:0] (session-17 aligned-window decode:
+// a LW/SW transfers the 4-register window {grp4,0..3}, grp4=ADR[2];
+// each access gated per SEL lane, see wb decode below):
 //   0  RX FIFO / TX holding : read pops 1 FIFO byte (at the R0 position in
 //      the word); write loads TX holding byte (dropped if TX busy) and
 //      clears OE/FE
