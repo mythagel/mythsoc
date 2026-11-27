@@ -192,4 +192,23 @@ t20loop:
     addi  x3, x3, 7
     sw    x3, 128(x1)           # slot32 = 0x80000007
 
+    # ---- T25: flush&&stall WB drop (t06 session-24 writeback loss) ----
+    # A cold-line load completes into WB exactly while a taken jal retires
+    # from MA; the jal's next instruction (killed) is a memory op parked in
+    # ID waiting its (Bare, 1-cyc) translation -> stall=1 on the flush edge.
+    # WB must (a) still WRITE the producer's result to the rf (rf_we_w has no
+    # !stall term) and (b) still LATCH the jal link into WB (MA/WB latch has
+    # the || flush term). Lose (a) -> x10 stale at 25f; lose (b) -> x11 bad.
+    li    x2, 0xBEEF
+    sw    x2, 1332(x1)          # DRAM word 333: store-through, line uncached
+.L25l:
+    lw    x10, 1332(x1)         # producer: cold miss (WB ~4 cyc later)
+    jal   x11, .L25t            # flush source: retires the WB-hazard edge
+    lbu   x12, 1332(x1)         # killed, but parks ID -> stall on that edge
+.L25t:
+    mv    x13, x10              # needs rf x10 = 0xBEEF (no fwd window left)
+    sw    x13, 132(x1)          # slot33 = 0xBEEF (dropped WB -> stale 0)
+    sw    x11, 136(x1)          # slot34 = jal link .L25l+8 (golden-checked;
+                                #            frozen WB latch -> stale link)
+
 1:  j     1b                    # halt (self-loop)

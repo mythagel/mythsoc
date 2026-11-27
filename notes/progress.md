@@ -1,5 +1,43 @@
 # progress
 
+## 2026-11-28 (session 24)
+- t06 Dhrystone (design.md sec.10 F) GREEN: tests/dry.c/dry2.c/dry.h/dry_lib.c
+  (Dhrystone 2.2a port, freestanding libc) + tests/dry1.c driver (RUNS=5,
+  dram[40]=loop cycles, [42]=runs; tb_fw +DUMP -> tools/dmips.py).
+  Result: 2480 cyc/run, 0.229 DMIPS/MHz, 5.7 DMIPS @25 MHz. No FPU,
+  RV32IM + 1-cyc-hit L1s + in-order 5-stage => expected ~0.23 class.
+- Root-caused the t06 hang to TWO independent bugs (VCD forensics with new
+  tools/vcd_xfirst.py --after/--ctx; first X: VA 0x8000_68D4 Ch_1_Glob):
+  1) MISSING BOOTLOADER (gap, not RTL bug): wb_ram boots X; C needs .data
+     image copy + .bss zero. Fixed properly (board-relevant): scripts/link.lds
+     rewritten (.bss NOLOAD @0x8000_0000 with KEEP(*(.data.dram)) FIRST so
+     dram[] stays exactly at 0x8000_0000; .data PROGBITS VMA after .bss,
+     LMA = right after .text in ROM; __data_start/__data_end/__data_load/
+     __bss_start/__bss_end); tests/fw_entry.S = copy loop + zero loop before
+     sp/main; fw_build.sh/dry_build.sh objcopy .text+.data + symbol gates.
+     Affects t03-t06 (all C tests); t01/t02 asm path unaffected.
+  2) RTL WRITEBACK DROP (core.v): rf_we_w had !stall -> on flush&&stall edges
+     (redirect source in exma + killed mem op parked in ID) the WB-stage
+     producer's result was silently lost (t06: lw a0;jal callee -> callee got
+     STALE a0 -> X-address loads -> fetch death ~40k cyc later). Fix: drop the
+     !stall term (stall-cycle re-writes are idempotent: mawb holds; in-order
+     WB keeps ordering). MA/WB latch keeps its (!stall || flush) term -- BOTH
+     needed together. Negative-verified via C8-T25.
+- C8 +T25 guard (36 checks): cold-load producer + taken jal + killed lbu
+  (stall source); slot33 x10=0xBEEF, slot34 jal link vs emu32 golden;
+  re-adding !stall FAILS both. LLVM IAS lessons: li rd,sym±N rejected for
+  forward/cross-absolute refs -- C8 idiom = store to scoreboard, golden checks.
+- tb_fw.v XGUARD made ALWAYS-ON (trip on X rf-write or X in fetch-control
+  regs): X-contamination classes now fail fast, not livelock.
+- t04 WDT 300000->800000 (regress.sh): NOT a break -- bootloader .bss zero
+  adds ~215k cyc (30,722 words x ~7, write-through); t04 completes at
+  475,967 cyc. Confirmed via +HB trace (was still in 0x40-0x4c zero loop).
+- FULL REGRESSION ALL GREEN: mmu l1_i l1_d wb_ic 16550 clint plic core(54)
+  c8(36) t01 t02 t03 t04 t05 t06 soc(16).
+## next
+- C8-Sv32 on-core; synth yosys->nextpnr-ecp5->ecppack (+fmax); board lpf;
+  README + peripheral docs.
+
 ## 2026-11-27 (session 23)
 - FULL RTL REVIEW for correctness/spec-conformance (all rtl/*.v vs specs/
   text extracts). Findings + spec citations in notes/review.md (F1..F16);

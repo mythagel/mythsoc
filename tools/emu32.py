@@ -44,7 +44,7 @@ def imm_j(insn):
     return v - (1 << 21) if v & 0x100000 else v
 
 
-def run(words, start_pc, verbose=False, arm_m=-1, arm_s=-1, pt=None):
+def run(words, start_pc, verbose=False, arm_m=-1, arm_s=-1, pt=None, maxn=10000):
     # pt: dict word-index -> PTE word (tb/tb_core_pt.hex); Sv32 ref walk
     rf = [0] * 32
     memw = {}                      # word index -> word (DRAM model, C4)
@@ -168,7 +168,7 @@ def run(words, start_pc, verbose=False, arm_m=-1, arm_s=-1, pt=None):
         if not (P['satp'] >> 31) and not (0 <= pc < 4 * len(words)):
             break
         guard += 1
-        if guard > 10000:
+        if guard > maxn:
             print('emu32: RUNAWAY pc=%#x priv=%d mstatus=%#x' % (pc, P['priv'], P['mstatus']), file=sys.stderr)
             break
         # boundary before retiring this pc: consume pin timers, snapshot
@@ -343,7 +343,13 @@ def run(words, start_pc, verbose=False, arm_m=-1, arm_s=-1, pt=None):
             dok, dpa = xlate(eff, 'load')
             if not dok:
                 pc = trap(13, eff); n += 1; continue
-            word = memw.get(dpa >> 2, 0)
+            widx_l = dpa >> 2
+            if widx_l in memw:
+                word = memw[widx_l]
+            elif dpa < 4 * len(words):
+                word = words[widx_l]          # ROM window (t06 rodata)
+            else:
+                word = 0                      # DRAM unwritten (sim X->0)
             off = eff & 3
             if f3 == 0: w = sx((word >> (8 * off)) & 0xFF, 8)
             elif f3 == 1: w = sx((word >> (8 * off)) & 0xFFFF, 16)
@@ -363,9 +369,10 @@ def run(words, start_pc, verbose=False, arm_m=-1, arm_s=-1, pt=None):
                   1: ((b & 0xFFFF) << 16) | (b & 0xFFFF),
                   2: b & MASK}[f3]
             widx = dpa >> 2
-            word = memw.get(widx, 0)
-            mask = sum(0xFF << (8 * i) for i in range(4) if (sel >> i) & 1)
-            memw[widx] = ((word & ~mask) | (wd & mask)) & MASK
+            if dpa >= 4 * len(words):         # ROM is RO (wb_rom): drop
+                word = memw.get(widx, 0)
+                mask = sum(0xFF << (8 * i) for i in range(4) if (sel >> i) & 1)
+                memw[widx] = ((word & ~mask) | (wd & mask)) & MASK
         elif op == 0x63:                              # BRANCH
             off = imm_b(insn)
             t = {0: a == b, 1: a != b, 4: s(a) < s(b), 5: s(a) >= s(b),
@@ -408,6 +415,9 @@ def main():
         if a == "--exp":  exp_f = args[i + 1]
         if a == "--start": start = int(args[i + 1], 0)
     pt_f = None
+    maxn = 10000
+    for i, a in enumerate(args):
+        if a == "--max": maxn = int(args[i + 1], 0)
     for i, a in enumerate(args):
         if a == "--pt": pt_f = args[i + 1]
     PT = {}
@@ -421,7 +431,7 @@ def main():
     data = open(bin_f, "rb").read()
     data += b"\0" * ((4 - len(data) % 4) % 4)
     words = list(struct.unpack("<%dI" % (len(data) // 4), data))
-    rf, n, endpc, memw = run(words, start, verbose=trace, arm_m=arm_m, arm_s=arm_s, pt=PT)
+    rf, n, endpc, memw = run(words, start, verbose=trace, arm_m=arm_m, arm_s=arm_s, pt=PT, maxn=maxn)
     print("emu32: %d instrs, end pc=%#x" % (n, endpc))
     nz = [(i, v) for i, v in enumerate(rf) if i and v]
     print("emu32: rf non-zero: " + " ".join("x%d=%#010x" % t for t in nz))

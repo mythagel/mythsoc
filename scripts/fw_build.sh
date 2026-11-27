@@ -17,14 +17,18 @@ clang $CFLAGS -c tests/fw_traps.S  -o "$B/r.o"
 clang $CFLAGS -c "$TEST"            -o "$OBJ"
 clang --target=riscv32-unknown-elf -march=rv32im -mabi=ilp32 -nostdlib \
       -T scripts/link.lds -e _start -o "$ELF" "$B/e.o" "$OBJ" "$B/r.o"
-# sanity: _start @0, dram @0x80000000
+# sanity: _start @0, dram @0x80000000, bootloader symbols present
 S=$(llvm-nm "$ELF" | awk '$3 == "_start" {print $1}')
 D=$(llvm-nm "$ELF" | awk '$3 == "dram"   {print $1}')
 [ "$S" = "00000000" ]   || { echo "_start @ 0x$S != 0"; exit 1; }
 [ "$D" = "80000000" ] || { echo "dram @ 0x$D != 0x80000000"; exit 1; }
-llvm-objcopy --only-section=.text -O binary "$ELF" "$BIN"
+for s in __data_start __data_end __data_load __bss_start __bss_end; do
+    llvm-nm "$ELF" | grep -q " $s\$" || { echo "MISSING linker symbol $s"; exit 1; }
+done
+# ROM image = .text + .data load image (LMA-adjacent; entry copies it)
+llvm-objcopy --only-section=.text --only-section=.data -O binary "$ELF" "$BIN"
 SZ=$(wc -c < "$BIN")
-[ "$SZ" -le 16384 ] || { echo "code $SZ bytes > 16 KiB ROM"; exit 1; }
+[ "$SZ" -le 16384 ] || { echo "ROM image $SZ bytes > 16 KiB"; exit 1; }
 python3 -c "
 import sys
 d = open(sys.argv[1], 'rb').read()

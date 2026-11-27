@@ -311,7 +311,7 @@ F. Perf: Dhrystone (embedded) cycle count -> DMIPS/MHz via TB cycle count;
   - [x] C5 CSRs + sync exceptions (ecall/ebreak/illegal, mret, deleg)
   - [x] C6 interrupts (mip/mie, M>S, timer/sw/external, nested M->S)
   - [x] C7 MMU on (Sv32 I+D, perm faults, A/D, sfence, 4K/4M)
-  - [x] C8 Bare: dense hazard/forwarding regression (33 checks, tb/tb_c8) +
+  - [x] C8 Bare: dense hazard/forwarding regression (36 checks, tb/tb_c8) +
         d=1 load-use bug fix + IPC measured (1/cyc hits; 0.667 steady loop)
   - [ ] C8 Sv32 regression (C8 program under satp)
 - [x] soc top (sim) + tb (hex firmware): core+wb_ic+{ROM,DRAM,16550,CLINT,
@@ -331,8 +331,15 @@ cycle live on mip, fence.i coherence + mret-inval);
 + fence.i/Zifencei RTL landed (core.v: FENCE/FENCE.I decode, self-redirect,
 INVAL-held-until-idle; req_mmu gated by inval_p — t05 caught the held-INVAL
 translation-overwrite {pc,data} mispair bug);
-F: dhrystone pending
-- [ ] full suite green
+F: dhrystone DONE (session 24): tests/dry*.c Dhrystone 2.2a port + fw_entry.S
+bootloader (.data copy + .bss zero) in tb_fw; RUNS=5 -> 2480 cyc/run,
+0.229 DMIPS/MHz, 5.7 DMIPS @25 MHz (tools/dmips.py off +DUMP); exposed +
+fixed 2 real bugs (rf_we_w !stall WB-drop, negative-verified by C8-T25;
+missing bootloader = production gap, fixed in link.lds/fw_entry.S);
+tb_fw XGUARD now always-on (fail-fast on X rf-write / fetch-ctrl X)
+- [x] full suite green (regress.sh: mmu l1_i l1_d wb_ic 16550 clint plic
+      core(54) c8(36) t01-t06 soc(16) — session 24; t04 WDT->800k, t05 500k,
+      t06 1M: bootloader .bss-zero adds ~215k cyc on t04, ~119k on t06)
 - [ ] yosys synth + nextpnr + ecppack (bitstream) + fmax report
 - [ ] board lpf + openocd + boot stub (BRAM)
 - [ ] docs (README + every wishbone peripheral)

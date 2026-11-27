@@ -454,8 +454,104 @@ module tb_fw;
         end
     endtask
 
+    // +PCMON: per-cycle retired-PC histogram feed (perf tests). Prints
+    // "PC <mtime> <exma_pc>" whenever exma holds a valid instruction.
+    initial begin
+        if ($test$plusargs("PCMON")) begin
+            forever begin
+                @(negedge clk);
+                if (!rst && dut.core0.exma_v)
+                    $display("PC %h %h", dut.s3clint.mtime[31:0],
+                             dut.core0.exma_pc);
+            end
+        end
+    end
+
+    // +JMON: redirect journal -- every pipeline redirect with its source
+    // instruction + operands (return-address / jalr forensics).
+    initial begin
+        if ($test$plusargs("JMON")) begin
+            forever begin
+                @(negedge clk);
+                if (!rst && dut.core0.redirect)
+                    $display("JM t=%h pc=%h is=%h ra1=%h tgt=%h",
+                             dut.s3clint.mtime[31:0], dut.core0.exma_pc,
+                             dut.core0.exma_instr, dut.core0.rf[1],
+                             dut.core0.redirect_pc);
+            end
+        end
+    end
+
+    // +WBMON: every regfile write to x1 (call links) + every jalr read at
+    // commit (ret sites) -- return-address forensics (t06 livelock hunt).
+    initial begin
+        if ($test$plusargs("WBMON")) begin
+            forever begin
+                @(negedge clk);
+                if (!rst && dut.core0.mawb_wr && dut.core0.mawb_rd == 5'h1)
+                    $display("W1 t=%h wpc=%h val=%h", dut.s3clint.mtime[31:0],
+                             dut.core0.mawb_pc, dut.core0.mawb_res);
+                if (!rst && dut.core0.exma_v && dut.core0.exma_pc == 32'h0000094c)
+                    $display("JR t=%h rf1=%h", dut.s3clint.mtime[31:0],
+                             dut.core0.rf[1]);
+            end
+        end
+    end
+
+    // +VICTIM: detect the flush&&stall same-cycle that kills an exma writer
+    // before MA/WB latches it (writeback-loss class). Reports every cycle a
+    // valid, write-enabling exma instruction is cleared by flush while the
+    // MA/WB latch is frozen by stall.
+    initial begin
+        if ($test$plusargs("VICTIM")) begin
+            forever begin
+                @(negedge clk);
+                if (!rst && dut.core0.flush && dut.core0.stall &&
+                    dut.core0.exma_v && dut.core0.exma_wr)
+                    $display("VICT t=%h pc=%h rd=%0d pa=%b ma=%b div=%b exmem=%b idv=%b idmem=%b mdpv=%b fmd=%b",
+                             dut.s3clint.mtime[31:0], dut.core0.exma_pc,
+                             dut.core0.exma_rd, dut.core0.pa_wait,
+                             dut.core0.ma_wait, dut.core0.div_stall,
+                             dut.core0.exma_mem, dut.core0.idex_v,
+                             dut.core0.idex_mem, dut.core0.md_pv,
+                             dut.core0.fresh_md);
+            end
+        end
+    end
+
+    // XGUARD (ALWAYS ON): simulation X reaching fetch control is
+    // unrecoverable (X flush/req merges into the mio/lio/pav latches ->
+    // req_mmu gates X forever -> silent fetch death thousands of cycles
+    // later; t06 forensics 2026-11-28). Trip at the source: (1) X written
+    // to the rf, (2) X in any fetch-control register. Failure, not hang.
+    always @(negedge clk) begin
+        if (!rst) begin
+            if (dut.core0.mawb_wr && (^dut.core0.mawb_res === 1'bx)) begin
+                err("XGUARD rf-write X");
+                $display("  x%0d = X pc=%h t=%0t", dut.core0.mawb_rd,
+                         dut.core0.mawb_pc, $time);
+                $finish;
+            end
+            if (dut.core0.mio === 1'bx || dut.core0.lio === 1'bx ||
+                dut.core0.pav === 1'bx || dut.core0.pav_f === 1'bx ||
+                dut.core0.d_mio === 1'bx || dut.core0.d_lio === 1'bx ||
+                dut.core0.inval_p === 1'bx ||
+                dut.core0.fq_c === 3'bx || dut.core0.fq_w === 3'bx ||
+                dut.core0.fq_r === 3'bx) begin
+                err("XGUARD fetch-control X");
+                $display("  mio=%b lio=%b pav=%b/%b dmio=%b dlio=%b inval=%b fqc=%b fqw=%b fqr=%b t=%0t",
+                         dut.core0.mio, dut.core0.lio, dut.core0.pav,
+                         dut.core0.pav_f, dut.core0.d_mio, dut.core0.d_lio,
+                         dut.core0.inval_p, dut.core0.fq_c, dut.core0.fq_w,
+                         dut.core0.fq_r, $time);
+                $finish;
+            end
+        end
+    end
+
     // +VCD: dump core + ic + peripheral hierarchies for freeze forensics.
     // Parse with tools/vcd_last.py <vcd> <keep-samples> [substr ...].
+    // +X first-event scans: tools/vcd_xfirst.py (e.g. mio l1_data).
     initial begin
         if ($test$plusargs("VCD")) begin
             $dumpfile("/tmp/opencode/tb_fw.vcd");
@@ -580,7 +676,10 @@ module tb_fw;
             end
             $finish;
         end
-        if (dut.s1ram.mem[0] === 32'h0) begin ok("FW-pass"); end
+        if (dut.s1ram.mem[0] === 32'h0) begin
+            ok("FW-pass");
+            $display("  cycles=%0d (reset-release -> marker)", t);
+        end
         else begin
             err("FW-result");
             $display("  result=%h mcause=%h mepc=%h priv=%b",

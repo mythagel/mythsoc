@@ -1,7 +1,7 @@
 #!/bin/sh
 # regress.sh -- full test-suite runner (module benches + core + firmware suite).
 #   usage: scripts/regress.sh [name ...]     (default: all)
-# Names: mmu l1_i l1_d wb_ic 16550 clint plic core c8 soc t01 t02 t03 t04 t05
+# Names: mmu l1_i l1_d wb_ic 16550 clint plic core c8 soc t01 t02 t03 t04 t05 t06
 set -e
 cd "$(dirname "$0")/.."
 RTL="rtl/soc.v rtl/core.v rtl/mmu.v rtl/l1_i.v rtl/l1_d.v rtl/wb_ic.v rtl/wb_ic_mfifo.v rtl/wb_rom.v rtl/wb_ram.v rtl/16550.v rtl/clint.v rtl/plic.v"
@@ -9,7 +9,7 @@ CORE_RTL="rtl/core.v rtl/mmu.v rtl/l1_i.v rtl/l1_d.v"
 OUT=${OUT:-/tmp/opencode/regress}
 mkdir -p "$OUT"
 TARGETS="$*"
-[ -z "$TARGETS" ] && TARGETS="mmu l1_i l1_d wb_ic 16550 clint plic core c8 t01 t02 t03 t04 t05 soc"
+[ -z "$TARGETS" ] && TARGETS="mmu l1_i l1_d wb_ic 16550 clint plic core c8 t01 t02 t03 t04 t05 t06 soc"
 FAIL=0
 
 run() { # name build-cmd [vvp plusargs...]
@@ -43,9 +43,10 @@ for n in $TARGETS; do
     t01)   run t01 "sh scripts/fw_asm.sh tests/t01_isa.S tb/t_fw_t01.hex && iverilog -g2005 -s tb_fw -DROM_HEX='\"tb/t_fw_t01.hex\"' tb/tb_fw.v $RTL -o $OUT/t01.vvp" "" ;;
     t02)   run t02 "sh scripts/fw_asm.sh tests/t02_traps.S tb/t_fw_t02.hex && iverilog -g2005 -s tb_fw -DROM_HEX='\"tb/t_fw_t02.hex\"' tb/tb_fw.v $RTL -o $OUT/t02.vvp" "" ;;
     t03)   run t03 "sh scripts/fw_build.sh tests/t03_intr.c tb/t_fw_t03.hex && iverilog -g2005 -s tb_fw -DROM_HEX='\"tb/t_fw_t03.hex\"' tb/tb_fw.v $RTL -o $OUT/t03.vvp" "+LOOP" ;;
-    t04)   run t04 "sh scripts/fw_build.sh tests/t04_mmu.c tb/t_fw_t04.hex && iverilog -g2005 -s tb_fw -DROM_HEX='\"tb/t_fw_t04.hex\"' tb/tb_fw.v $RTL -o $OUT/t04.vvp" "" ;;
+    t04)   run t04 "sh scripts/fw_build.sh tests/t04_mmu.c tb/t_fw_t04.hex && iverilog -g2005 -s tb_fw -DROM_HEX='\"tb/t_fw_t04.hex\"' -DWDT=800000 tb/tb_fw.v $RTL -o $OUT/t04.vvp" "" ;;
     t05)   run t05 "sh scripts/fw_build.sh tests/t05_soc.c tb/t_fw_t05.hex && iverilog -g2005 -s tb_fw -DROM_HEX='\"tb/t_fw_t05.hex\"' -DWDT=500000 tb/tb_fw.v $RTL -o $OUT/t05.vvp" "+LOOP" ;;
     soc)   run soc "sh scripts/soc_asm.sh tb/tb_soc_fw.S tb/tb_soc_fw.hex && iverilog -g2005 -s tb_soc tb/tb_soc.v $RTL -o $OUT/soc.vvp" "" ;;
+    t06)   run t06 "sh scripts/dry_build.sh tb/t_fw_t06.hex && iverilog -g2005 -s tb_fw -DROM_HEX='\"tb/t_fw_t06.hex\"' -DWDT=1000000 tb/tb_fw.v $RTL -o $OUT/t06.vvp" "+DUMP" ;;
     *) echo "unknown target: $n"; FAIL=1 ;;
     esac
 done

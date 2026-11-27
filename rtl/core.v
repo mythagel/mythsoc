@@ -573,7 +573,17 @@ module core (
     wire        rf_we_a = 1'b0;            // MA port: no memory ops in C2
     wire [4:0]  rf_waddr_a = 5'h0;
     wire [31:0] rf_wdata_a = 32'h0;
-    wire        rf_we_w = mawb_wr && (mawb_rd != 5'h0) && !stall;
+    // NO !stall term (t06, session 24): a WB-stage producer must be written
+    // the cycle it is present, not the cycle the pipe advances. On a
+    // flush&&stall edge (redirect source in exma + younger idex op waiting
+    // translation) mawb latches the source (see MA/WB note) -- freezing the
+    // write too would silently DROP the producer's result (observed: caller's
+    // 'lw a0; jal callee; <stall>' -> callee's first rd=a0 consumer got the
+    // STALE pre-lw value; caught only because a0 then addressed X RAM).
+    // During a stall mawb holds, so re-writing the same (rd,val) every
+    // stalled cycle is idempotent and architecturally ordered (in-order WB:
+    // no younger writer can precede the held producer).
+    wire        rf_we_w = mawb_wr && (mawb_rd != 5'h0);
 
     integer i;
     always @(posedge clk or posedge rst) begin
@@ -916,10 +926,16 @@ module core (
     end
 
     // ------------------------------------------------------------ MA/WB
+    // (!stall || flush): the redirect source in exma ALWAYS advances. A
+    // flush-cycle stall (dead memory op in idex pending translation ->
+    // pa_wait) must NOT freeze this latch: exma's flush-branch clears it
+    // the same edge, so gating on !stall alone silently lost the writeback
+    // (t06: every `jal Proc_3` link destroyed -> ret-livelock; the dead-idex
+    // invariant mirrors the session-19 fresh_md comb-loop fix).
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             mawb_v <= 1'b0; mawb_wr <= 1'b0; mawb_rd <= 5'h0; mawb_res <= 32'h0; mawb_pc <= 32'h0;
-        end else if (!stall) begin
+        end else if (!stall || flush) begin
             mawb_v    <= exma_v;
             mawb_wr   <= exma_wr && !ma_trap_w;   // sync trap kills writeback
             mawb_rd   <= exma_rd;

@@ -94,7 +94,7 @@ module tb_c8;
 
     // ---------------- counters / guards ----------------
     integer exp  [0:31];
-    integer mexp [0:32];
+    integer mexp [0:34];
     integer nc = 0;                       // retired instructions
     always @(posedge clk) if (dut.commit) nc = nc + 1;
     integer fq_ovf = 0;                  // fetch FIFO overflow guard (bug if set)
@@ -157,15 +157,17 @@ module tb_c8;
         if (dram[30] !== mexp[30]) err("C8-T22 alu d1 mix"); else ok("C8-T22 alu d1 mix");
         if (dram[31] !== mexp[31]) err("C8-T23 rem b2b");    else ok("C8-T23 rem b2b");
         if (dram[32] !== mexp[32]) err("C8-T24 csr-vs-younger"); else ok("C8-T24 csr-vs-younger");
+        if (dram[33] !== mexp[33]) err("C8-T25 wb-loss ld");    else ok("C8-T25 wb-loss ld");
+        if (dram[34] !== mexp[34]) err("C8-T25 wb-loss link");  else ok("C8-T25 wb-loss link");
         // full scoreboard array (catches anything the named checks miss)
         bad = 0;
-        for (i = 0; i < 33; i = i + 1) begin
+        for (i = 0; i < 35; i = i + 1) begin
             if (dram[i] !== mexp[i]) begin
                 bad = bad + 1;
                 $display("  score[%0d] got %h exp %h", i, dram[i], mexp[i]);
             end
         end
-        if (bad) err("C8 scoreboard33");   else ok("C8-scoreboard33");
+        if (bad) err("C8-scoreboard35");   else ok("C8-scoreboard35");
 
         // ---- final register file vs golden ----
         bad = 0;
