@@ -15,7 +15,7 @@ mythrv32: RV32IM, M+S+U, 5-stage in-order, Sv32 MMU (L1/L2 TLB + page walk),
 4 KiB direct-mapped L1 I/D caches (D: write-through, no-allocate), 1 hart.
 SoC: pipelined Wishbone B4 interconnect (3 masters x 5 slaves), 16550 UART,
 CLINT, PLIC (16 sources, 2 contexts: M=0, S=1 — ratified PLIC spec has no U context),
-ROM (boot), DRAM (sim: WB RAM; board: SDRAM via existing wb_sdram_ctrl).
+ROM (boot), DRAM (sim: WB RAM; board: SDRAM via wb_sdram.v, notes 6a).
 
 Target: Lattice ECP5 LFE5U-25F (BG256) on Colorlight 5a-75b v8.2, 25 MHz sysclk.
 Performance goal: synth/P&R closure >= 25 MHz (min), target 60 MHz, ideal 80 MHz.
@@ -95,9 +95,9 @@ TB: div=1, bit time 16.
 
 Masters (3): m0 = I-cache (read only), m1 = D-cache (read/write), m2 = MMU walk (read only).
 Slaves (5): s0 ROM, s1 DRAM, s2 UART, s3 CLINT, s4 PLIC. + virtual s5 "null" (unmapped).
-DRAM sim = wb_ram (BRAM, 1-cycle). DRAM board = dram_adapter -> wb_sdram_ctrl (WB_PORTS=1):
-  its WB port requires CYC & STB HELD until ACK (PicoRV32 style, no STALL); adapter converts
-  wb_ic slave protocol (single STB, wait for ACK) to held STB+CYC. (Board stage; sim never needs it.)
+DRAM sim = wb_ram (BRAM, 1-cycle). DRAM board = wb_sdram.v (session 27, pipelined SDRAM
+  controller, supersedes the dram_adapter + wb_sdram_ctrl plan): speaks the wb_ic slave
+  protocol natively (1-cycle STB, >=1-cycle in-order ACK, no STALL/ERR) — no adapter.
 
 Master-facing protocol (IC as slave to master m), per master:
 - Master asserts STB[m]=1 for exactly 1 cycle per transfer; {WE,SEL,ADR,DAT} valid on that cycle.
@@ -133,7 +133,48 @@ IC internal design (pipelined; up to 3 transfers in flight, one per master):
 - Latency: 1-cycle slave => master STB at c, master ACK at c+1 (1 cycle total).
   Multi-cycle slave => master ACK at slave's ACK cycle.
 
+### 6a. wb_sdram.v — pipelined SDRAM controller (session 27, TB-verified)
+
+Device: ESMT M12L64322A(2S) on 5a-75b v8.2 (x32, 4 banks x 16M, CL2/BL1 seq via MRS
+13'h021; DQM/CKE/CS tied static on V8.2 -> byte writes are RMW). Word addr =
+ADR[21:2] = {row[9:0], bank[1:0], col[7:0]}. Timing localparams derive from CLK_FREQ
+identically to tools/sdram_calc.py (source of truth; TB S0 cross-checks generated
+tb/sdram_params.vh @25 MHz: T_RCD/RP/RRD=1, T_RAS/RC/RFC=2, T_MRD=2, T_REF=390,
+T_INIT=5000, CL=2).
+
+Cycle convention (VERIFIED against device model): decision d -> command pads visible
+cycle d+1 (cmd_r FF is THE one-cycle interface register; strobes are a COMBINATIONAL
+decode of cmd_r — registering them adds a phantom cycle). Truth table (RAS,CAS,WE):
+ACT=011, READ=101, WRITE=100, PRE=010, REF=001, MRS=000, NOP=111. D0 launched CL edges
+after the latch edge -> capture at cyc == d+CL+2 (RDLEAD); result visible d+CL+3.
+Write data pad drives d+2 (dq_a -> dq_r chain, oe offset one stage).
+
+Microarchitecture (measured @25 MHz, tb_wb_sdram S3):
+- 2-entry request queue (q0/q1) + 4-slot speculative read ring (sr_*): sequential-read
+  chase pointer ch_ad fills the ring with C_RDs in command-bus idle slots; a served STB
+  hit (READY slot, or a slot whose capture edge IS the STB cycle — served straight from
+  the DQ bus) answers in that cycle. Chase lead is kept across serves (re-armed only on
+  stream discontinuity); ring is flushed on any STB read miss except an in-flight fill of
+  the new address; duplicate targets are skipped (ch_dup).
+- Fast paths on the STB cycle: ring-hit read serve (0 added cycles); posted full-word
+  write (SEL=1111, row hit, gap ok) ACKed immediately, data issued behind.
+- Byte writes: RMW = C_RD old -> merge with SEL lanes -> C_WR; ack posted at pop.
+- Refresh: ref_cnt -> ref_due; comb priority = in-flight chains > drain (PRE all banks,
+  REF) > fresh issue (blocked while ref_due). rfs_drain keys on DEVICE-side state
+  (ts_rd[b] window, rd_v/pa_v/rwm/wa1) so ring flushes can't erase an outstanding burst.
+- Turnaround gates: R->W col gap >= CL+2, W->R >= 2, same-type >= 1 (gap_rd/gap_wr);
+  PRE forbidden on banks with un-captured reads (pend_b via ts_rd window).
+- Measured: cold read 8 cyc post-STB; streams 33 cyc/16 full-word writes (2.06/word),
+  38 cyc/16 prefetch reads (2.375/word incl. ramp) -> at the ~1 word/2cyc wb_ic
+  interface ceiling (50 MB/s @25 MHz). Init FSM: T_INIT NOP -> PREA -> MRS -> REF.
+- Tests S0-S10 (41 checks): param cross-check, init+MRS decode, cold R/W, row-hit/bank
+  interleave, bank-cross RMW merge, byte patterns, turnaround, refresh survival + count,
+  400-op random stress with full readback, reset recovery. Device model independently
+  asserts timing/coherency/DQ-contention/WB-protocol. Makefile: `make sdram`, in regress.
+
 ## 7. Core (mythrv32) — 5-stage in-order RV32IM
+
+
 
 IF: PC -> MMU-I (VA->PA, TLB) -> I-cache -> fetch word. 1 instr/cycle (32-bit).
 ID: decode, 2 regfile reads (3 R ports), CSR read. Forwarding from EX/MA/WB.
@@ -257,7 +298,7 @@ D-cache: 4 KiB, direct-mapped, 1-word lines, write-through, no-allocate on miss.
 ECP5 BRAM: no ECC. OK.)
 
 ## 9. SoC top (sim) ports: clk, rst, uart_tx/uart_rx (16550), rom hex load, RAM init hex,
-JTAG: none in sim. Board top: +sdram pads (wb_sdram_ctrl), led (T6), key (R7), clk P6 25 MHz,
+JTAG: none in sim. Board top: +sdram pads (wb_sdram), led (T6), key (R7), clk P6 25 MHz,
 jtag header (J27/J31/J32/J30) for openocd bit loading only (no in-design JTAG).
 
 ## 10. Test plan (tests/, C-first, compiled by clang)
@@ -356,6 +397,8 @@ rerun (see sec.12 C8)
 - [x] full suite green (make regress: mmu l1_i l1_d wb_ic 16550 clint plic
       core(54) c8(36) t01-t07 soc(16) — session 26; t04 WDT->800k, t05 500k,
       t06 1M, t07 500k: bootloader .bss-zero adds ~215k cyc on t04, ~119k t06)
+- [x] wb_sdram.v pipelined SDRAM controller + tb (session 27, notes 6a):
+      41 checks, wr 2.06 / rd 2.375 cyc/word measured @25 MHz, lint clean
 - [ ] yosys synth + nextpnr + ecppack (bitstream) + fmax report
 - [ ] board lpf + openocd + boot stub (BRAM)
 - [ ] docs (README + every wishbone peripheral)

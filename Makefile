@@ -51,7 +51,7 @@ BIN2HEX   := tools/bin2hex.py
 FW_RANGES := tools/fw_ranges.py
 LDS       := scripts/link.lds
 
-TESTS := mmu l1_i l1_d wb_ic 16550 clint plic core c8 t01 t02 t03 t04 t05 t06 t07 soc
+TESTS := mmu l1_i l1_d wb_ic 16550 clint plic sdram core c8 t01 t02 t03 t04 t05 t06 t07 soc
 IMAGES := tb/tb_core.hex tb/tb_core_exp.vh tb/tb_core_irq.vh \
           tb/tb_c8.hex tb/tb_c8_exp.vh \
           tb/t_fw_t01.hex tb/t_fw_t02.hex tb/t_fw_t03.hex tb/t_fw_t04.hex \
@@ -104,6 +104,13 @@ $(OUT)/clint.vvp: tb/tb_clint.v rtl/clint.v | $(OUT)
 	$(IV) $(IVFLAGS) -s tb_clint $^ -o $@
 $(OUT)/plic.vvp:  tb/tb_plic.v  rtl/plic.v  | $(OUT)
 	$(IV) $(IVFLAGS) -s tb_plic  $^ -o $@
+$(OUT)/sdram.vvp: tb/tb_wb_sdram.v rtl/wb_sdram.v tb/sdram_params.vh | $(OUT)
+	$(IV) $(IVFLAGS) -s tb_wb_sdram $^ -o $@
+
+# SDRAM timing header: tools/sdram_calc.py is the source of truth (the TB
+# cross-checks RTL-internal localparams against it in S0). CLK = 25 MHz.
+tb/sdram_params.vh: tools/sdram_calc.py
+	$(PY) $< --vh 25 > $@
 
 # core/c8 include their emu32 goldens at COMPILE time -> vh files are deps.
 $(OUT)/core.vvp: tb/tb_core.v $(CORE_RTL) tb/tb_core_exp.vh tb/tb_core_irq.vh | $(OUT)
@@ -144,6 +151,8 @@ clint: $(OUT)/clint.vvp
 	@$(call run,clint)
 plic:  $(OUT)/plic.vvp
 	@$(call run,plic)
+sdram: $(OUT)/sdram.vvp
+	@$(call run,sdram)
 core:  $(OUT)/core.vvp tb/tb_core.hex
 	@$(call run,core)
 c8:    $(OUT)/c8.vvp tb/tb_c8.hex

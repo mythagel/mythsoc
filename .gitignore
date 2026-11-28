@@ -11,3 +11,4 @@ t4.S
 tc.S
 tn.S
 tb/tb_c8_irq.vh
+tb/sdram_params.vh

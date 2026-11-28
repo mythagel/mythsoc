@@ -1,5 +1,35 @@
 # progress
 
+## 2026-11-28 (session 27)
+- NEW rtl/wb_sdram.v: pipelined Wishbone SDRAM controller for M12L64322A(2S)
+  @25 MHz — replaces wb_sdram_ctrl+dram_adapter plan (design.md 6a). Speaks
+  wb_ic slave protocol natively. ARCH: 2-entry queue, 4-slot speculative
+  read ring + chase pointer, posted full-word writes, RMW byte writes,
+  REFRESH FSM w/ device-side drain, fast-path STB-cycle serve (incl.
+  capture-edge bypass straight from DQ bus).
+- tools/sdram_calc.py (datasheet -7 worst-case -> cycle counts, --vh header
+  gen; Makefile rule regenerates tb/sdram_params.vh) + TB S0 cross-check.
+- tb/tb_wb_sdram.v: independent device model w/ timing (RAS/RC/RP/RFC/MRD/
+  ref-window), coherency, DQ-contention, WB-protocol assertions. S0-S10:
+  41 checks ALL PASS. Measured: cold rd 8 cyc; 16-wr stream 33 cyc (2.06/
+  word = interface ceiling); 16-rd prefetch stream 38 cyc (2.375 incl ramp);
+  refresh + 400-op random stress clean. verilator --lint-only -Wall clean.
+- Bring-up bugs (all in RTL/TB, found only by sim — rule 3 payoff):
+  * command truth table was memory-wrong in BOTH RTL+TB; fixed from
+    datasheet SIMPLIFIED TRUTH TABLE (ACT=011 RD=101 WR=100 PRE=010
+    REF=001 MRS=000, RAS/CAS/WE).
+  * registered strobe decode added a phantom cycle -> comb decode of cmd_r.
+  * Hz-form localparam math silently overflowed 2^31 (S0 caught); MHz form.
+  * ring dedup: chase re-armed onto in-flight slots (wasted fills) ->
+    ch_dup skip + keep-lead re-arm policy + stream-break flush; head RD
+    gated against pending ring slot (no redundant C_RD).
+  * PRE-burst guard keyed on ring slots -> keyed on DEVICE-side ts_rd
+    window (ring flush cannot erase an outstanding burst).
+  * refresh deadlock: in-flight chains must complete even while ref_due;
+    comb priority in-flight > drain > fresh-issue.
+- Makefile: sdram target wired into TESTS/regress. Full `make regress`
+  (16 benches) re-run pending this session's tail.
+
 ## 2026-11-28 (session 26)
 - POLICY (user): test code in C/C++ -- assembly ONLY where required (crt0,
   trap shims, CSR/sfence/ecall inline asm, raw-encoding blobs). Recorded in
