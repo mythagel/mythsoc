@@ -8,7 +8,7 @@
 //   0x8000_1000+c = unexpected trap (cause c)
 // Watchdog: no marker within 1M cycles -> FAIL + core state dump.
 //
-// Run: make t01 .. t06 (the Makefile builds each test group into its own hex
+// Run: make t01 .. t07 (the Makefile builds each test group into its own hex
 // and invokes this TB with -D ROM_HEX='"<hex>"').
 `timescale 1ns/1ps
 module tb_fw;

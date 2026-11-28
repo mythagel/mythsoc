@@ -4,7 +4,7 @@
 # usage:
 #   make regress              full suite, continue-on-fail, pass-marker checked
 #                             (mmu l1_i l1_d wb_ic 16550 clint plic core c8
-#                              t01 t02 t03 t04 t05 t06 soc)
+#                              t01 t02 t03 t04 t05 t06 t07 soc)
 #   make <name>               build + run one bench (same names)
 #   make images               rebuild all generated ROM/golden artifacts only
 #   make clean                remove build/ + sim output
@@ -51,11 +51,11 @@ BIN2HEX   := tools/bin2hex.py
 FW_RANGES := tools/fw_ranges.py
 LDS       := scripts/link.lds
 
-TESTS := mmu l1_i l1_d wb_ic 16550 clint plic core c8 t01 t02 t03 t04 t05 t06 soc
+TESTS := mmu l1_i l1_d wb_ic 16550 clint plic core c8 t01 t02 t03 t04 t05 t06 t07 soc
 IMAGES := tb/tb_core.hex tb/tb_core_exp.vh tb/tb_core_irq.vh \
           tb/tb_c8.hex tb/tb_c8_exp.vh \
           tb/t_fw_t01.hex tb/t_fw_t02.hex tb/t_fw_t03.hex tb/t_fw_t04.hex \
-          tb/t_fw_t05.hex tb/t_fw_t06.hex tb/tb_soc_fw.hex
+          tb/t_fw_t05.hex tb/t_fw_t06.hex tb/t_fw_t07.hex tb/tb_soc_fw.hex
 
 .PHONY: all images regress clean $(TESTS)
 
@@ -124,6 +124,8 @@ $(OUT)/t05.vvp: tb/tb_fw.v $(RTL) | $(OUT)
 	$(IV) $(IVFLAGS) -s tb_fw -DROM_HEX='"tb/t_fw_t05.hex"' -DWDT=500000 $^ -o $@
 $(OUT)/t06.vvp: tb/tb_fw.v $(RTL) | $(OUT)
 	$(IV) $(IVFLAGS) -s tb_fw -DROM_HEX='"tb/t_fw_t06.hex"' -DWDT=1000000 $^ -o $@
+$(OUT)/t07.vvp: tb/tb_fw.v $(RTL) | $(OUT)
+	$(IV) $(IVFLAGS) -s tb_fw -DROM_HEX='"tb/t_fw_t07.hex"' -DWDT=500000 $^ -o $@
 $(OUT)/soc.vvp: tb/tb_soc.v $(RTL) | $(OUT)
 	$(IV) $(IVFLAGS) -s tb_soc $^ -o $@
 
@@ -158,6 +160,8 @@ t05:   $(OUT)/t05.vvp tb/t_fw_t05.hex
 	@$(call run,t05,+LOOP)
 t06:   $(OUT)/t06.vvp tb/t_fw_t06.hex
 	@$(call run,t06,+DUMP)
+t07:   $(OUT)/t07.vvp tb/t_fw_t07.hex
+	@$(call run,t07)
 soc:   $(OUT)/soc.vvp tb/tb_soc_fw.hex
 	@$(call run,soc)
 
@@ -254,6 +258,18 @@ tb/t_fw_t04.hex: $(B)/c/t04.bin
 	@$(call check_rom,$(B)/c/t04.bin)
 	@$(PY) $(FW_RANGES) tests/t04_mmu.c $(B)/c/t04.elf \
 	  || { echo "RANGE-FAIL: fix SPANs in tests/t04_mmu.c"; exit 1; }
+	@echo "built $@ ($$(wc -l < $@) words)"
+
+$(B)/c/t07.elf: $(B)/c/e.o $(B)/c/t07_sv32_haz.o $(B)/c/r.o
+	$(CC) $(RV) -nostdlib -T $(LDS) -e _start -o $@ $^
+	@$(call check_fw,$@)
+$(B)/c/t07.bin: $(B)/c/t07.elf
+	$(OC) --only-section=.text --only-section=.data -O binary $< $@
+tb/t_fw_t07.hex: $(B)/c/t07.bin
+	@$(PY) $(BIN2HEX) $< $@
+	@$(call check_rom,$(B)/c/t07.bin)
+	@$(PY) $(FW_RANGES) tests/t07_sv32_haz.c $(B)/c/t07.elf \
+	  || { echo "RANGE-FAIL: fix SPANs in tests/t07_sv32_haz.c"; exit 1; }
 	@echo "built $@ ($$(wc -l < $@) words)"
 
 $(B)/c/t05.elf: $(B)/c/e.o $(B)/c/t05_soc.o $(B)/c/r.o

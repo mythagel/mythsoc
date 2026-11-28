@@ -119,6 +119,12 @@ Spec: priv Ch.12 (Sv32, 12.3); unpriv Ch.2; ref model tools/mmu_addr.py.
 Done: load-use (MA→ID 1-cyc stall + forward); forwarding chains (EX/MA/WB→ID);
 back-to-back; misaligned traps; full RV32IM regression in both modes.
 Spec: unpriv Ch.2/12.
+Sv32 half: C-first policy (session 26) -- NOT a re-run of tb_c8.S under
+satp; the on-core Sv32 hazard regression is the C battery tests/t07_sv32_haz.c
+(fw framework, tb_fw harness). tb_c8.S stays as the Bare dense-encodings
+golden bench (instruction spacing that C cannot force; asm-where-required).
+DONE session 26: t07 45 checks GREEN, trap-free; div-edge semantics need the
+asm helper (C UB => LLVM folds; objdump-verified).
 
 ## TB notes
 - One growing testbench: tb/tb_core.v, labeled check groups (C1-…, C2-…, …)

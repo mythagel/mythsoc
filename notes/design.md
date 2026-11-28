@@ -260,7 +260,16 @@ ECP5 BRAM: no ECC. OK.)
 JTAG: none in sim. Board top: +sdram pads (wb_sdram_ctrl), led (T6), key (R7), clk P6 25 MHz,
 jtag header (J27/J31/J32/J30) for openocd bit loading only (no in-design JTAG).
 
-## 10. Test plan (tests/, hand-written .S, compiled by clang)
+## 10. Test plan (tests/, C-first, compiled by clang)
+
+LANGUAGE POLICY (session 26): test code is written in **C** (freestanding;
+C++ acceptable) -- NOT new hand-written .S programs. Assembly only where
+required: crt0/bootloader (fw_entry.S), trap shims (fw_traps.S), inline-asm
+accessors C cannot express (CSR ops, sfence.vma, ecall/ebreak, raw/illegal
+encodings, self-modifying blobs). Existing .S benches tb_core.S/tb_c8.S are
+RTL-block harnesses (kept); t01/t02 (generated/hand asm ISA+trap encodings,
+where the encoding IS the test) stay as legacy coverage. New batteries
+(t07+) are C via the fw framework (tests/lib.h chk protocol).
 
 lib.S: framework (pass/fail via UART "PASS/FAIL name", trap catcher printing mcause).
 A. ISA: all RV32I instructions (reg/imm, all ALU, branches, jumps, all loads/stores,
@@ -313,7 +322,10 @@ F. Perf: Dhrystone (embedded) cycle count -> DMIPS/MHz via TB cycle count;
   - [x] C7 MMU on (Sv32 I+D, perm faults, A/D, sfence, 4K/4M)
   - [x] C8 Bare: dense hazard/forwarding regression (36 checks, tb/tb_c8) +
         d=1 load-use bug fix + IPC measured (1/cyc hits; 0.667 steady loop)
-  - [ ] C8 Sv32 regression (C8 program under satp)
+  - [x] C8 Sv32 regression: t07_sv32_haz.c (C-first policy, session 26) --
+        C8 hazard classes as C volatile dataflow under live Sv32 + alias
+        triangle + I-side ROM-alias calls + asid1 rerun; 45 chk GREEN,
+        trap-free (286,299 cyc)
 - [x] soc top (sim) + tb (hex firmware): core+wb_ic+{ROM,DRAM,16550,CLINT,
       PLIC} wired (rtl/soc.v, wb_rom/wb_ram); tb_soc 16 checks GREEN (boot,
       UART rx irq via PLIC->meip, TX loopback echo, msip, mtime monotonic,
@@ -336,10 +348,14 @@ bootloader (.data copy + .bss zero) in tb_fw; RUNS=5 -> 2480 cyc/run,
 0.229 DMIPS/MHz, 5.7 DMIPS @25 MHz (tools/dmips.py off +DUMP); exposed +
 fixed 2 real bugs (rf_we_w !stall WB-drop, negative-verified by C8-T25;
 missing bootloader = production gap, fixed in link.lds/fw_entry.S);
-tb_fw XGUARD now always-on (fail-fast on X rf-write / fetch-ctrl X)
+tb_fw XGUARD now always-on (fail-fast on X rf-write / fetch-ctrl X);
+G(C-first): t07_sv32_haz.c 45 checks GREEN (session 26) — C8-Sv32 on-core:
+dense RAW/forwarding classes as C volatile dataflow with cold-TLB walks parked
+under every hazard window + alias triangle + I-side ROM-alias calls + asid1
+rerun (see sec.12 C8)
 - [x] full suite green (make regress: mmu l1_i l1_d wb_ic 16550 clint plic
-      core(54) c8(36) t01-t06 soc(16) — session 24; t04 WDT->800k, t05 500k,
-      t06 1M: bootloader .bss-zero adds ~215k cyc on t04, ~119k on t06)
+      core(54) c8(36) t01-t07 soc(16) — session 26; t04 WDT->800k, t05 500k,
+      t06 1M, t07 500k: bootloader .bss-zero adds ~215k cyc on t04, ~119k t06)
 - [ ] yosys synth + nextpnr + ecppack (bitstream) + fmax report
 - [ ] board lpf + openocd + boot stub (BRAM)
 - [ ] docs (README + every wishbone peripheral)

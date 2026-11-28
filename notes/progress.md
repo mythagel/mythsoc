@@ -1,5 +1,45 @@
 # progress
 
+## 2026-11-28 (session 26)
+- POLICY (user): test code in C/C++ -- assembly ONLY where required (crt0,
+  trap shims, CSR/sfence/ecall inline asm, raw-encoding blobs). Recorded in
+  design.md sec.10. tb_c8.S/tb_core.S stay as RTL-block asm golden benches;
+  t01/t02 stay (encoding IS the test). C8-Sv32 half of sec.12 -> NEW C
+  battery tests/t07_sv32_haz.c (was "C8 program under satp" re-run).
+- t07_sv32_haz.c: S-mode, satp on; C8 T1-T24 hazard patterns re-expressed as
+  C dataflow (volatile load chains) + MMU-specific passes: cold-TLB load/use
+  d=1 (walk parks MA mid-chain), sf_all between items, 4K alias windows ->
+  scratch pages (+4M mega alias +identity coherence triangle), ld->fptr->jalr,
+  I-side ROM 4K-alias calls (walk+refill mid call-chain), asid1 rerun.
+  Handlers record+skip; FINAL check: trap counts must be 0.
+- t07 GREEN (45 fw chk, 286,299 cyc, WDT 500k): cold-TLB ALU d=1..4 chains
+  over DOUBLE serialized walks, load-use per width (LW/LB/LH/LBU/LHU),
+  st->ld / st->st b2b, ld->branch across 8 cold pages, ld->jalr, mul chains,
+  CSR d=1 (sscratch), 32-iter loop (walk every 4th load), same-reg b2b
+  overwrite, varied ALU mix; alias triangle (identity/4K/mega same-PA
+  interleaved RMW); I-side ROM 4K-alias calls (nested g2(g1()), link chain
+  across 2 walks); asid1 re-run pass res2==res1.
+- LLVM lessons (recorded in-file): div-by-0 / INT_MIN-div / x/-1 are C UB --
+  -O2 FOLDS them (objdump: zero DIV emitted via C operators; even
+  udiv==0xFFFFFFFF folded to a DIVISOR compare). asm-where-required
+  DIV/REM/DIVU/REMU block (chk 18-24) -- objdump-verified real instrs.
+  -Wparentheses fires on `a == b ^ c` (== binds looser).
+- t07 bring-up failures were ALL test bugs (no RTL finds): chk5 mirror dropped
+  its own +1; E seed 0xC0C00004+i collided with the pg0 match constant (pg2);
+  chk7 head-arithmetic slip (0xFFFFC0FF*2 &mask = 0xFFFF81FE -- python
+  corrected me, rule 2). Debug affordance: pass results -> dram[24..31]
+  (tb_fw dumps 0..115).
+- Makefile: t07 wired (target + vvp -DWDT=500000 + images + fw gates);
+  tb_fw.v doc-comment t01..t07.
+- MMON proof-of-intent (+MMON run): 174,821 I + 23,843 D translation REQs,
+  104 D-fills incl asid=1 4K entries at the alias window, 47 SFENCE commits;
+  satp=0 REQs only in the M boot phase.
+- FULL REGRESSION ALL GREEN (15): mmu l1_i l1_d wb_ic 16550 clint plic
+  core(54) c8(36) t01..t07 soc(16).
+## next
+- synth yosys->nextpnr-ecp5->ecppack (+fmax 25/60/80 gate); board lpf;
+  README + peripheral docs.
+
 ## 2026-11-28 (session 25)
 - BUILD: scripts/*.sh -> top-level Makefile (git rm scripts/core_asm.sh,
   fw_asm.sh, fw_build.sh, dry_build.sh, soc_asm.sh, regress.sh; scripts/ keeps
