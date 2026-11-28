@@ -102,7 +102,10 @@ module u16550 #(
     wire rx_push = tick && (rx_st == RX_STOP) && rxd;
     wire pop1 = reg0_rd && (fcnt > 0);
 
-    always @(posedge clk or posedge rst) begin
+    // SYNCHRONOUS reset: this is the RX-FIFO storage-array writer process
+    // (mem[]); clk-only keeps the array $mem-inferable (async-reset writers
+    // fall back to a register list). Reset held across >=2 edges everywhere.
+    always @(posedge clk) begin
         if (rst) begin
             fwr <= 0; frd <= 0; fcnt <= 0; oe <= 0; fe <= 0;
             rx_st <= RX_IDLE; rx_n <= 0; rx_shift <= 0;

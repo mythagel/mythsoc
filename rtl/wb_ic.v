@@ -121,7 +121,11 @@ module wb_ic (
     reg         busy0, busy1, busy2;   // master has 1 outstanding
     reg [4:0]   s_busy;                 // per real slave 0..4
     reg         nbusy;                  // null slave outstanding
-    reg [1:0]   sm [0:5];               // slave 0..5 (5=null) -> master idx
+    reg [1:0]   sm0, sm1, sm2, sm3, sm4, sm5;  // slave 0..5 (5=null) -> master idx
+                                             // (scalar: every access is constant-
+                                             // indexed; an array here would make
+                                             // this async-reset process a memory
+                                             // writer -> yosys register-list warn)
     reg         byp1_0, byp1_1, byp1_2; // bypass grant, 1-cycle delayed
 
     wire [5:0] busyv = {nbusy, s_busy};
@@ -188,8 +192,8 @@ module wb_ic (
     wire [4:0]   s_ack  = {s4_ACK, s3_ACK, s2_ACK, s1_ACK, s0_ACK};
     wire [31:0]  rs0 = s0_RDAT, rs1 = s1_RDAT, rs2 = s2_RDAT,
                    rs3 = s3_RDAT, rs4 = s4_RDAT;
-    wire [1:0]  mr0 = sm[0], mr1 = sm[1], mr2 = sm[2],
-                 mr3 = sm[3], mr4 = sm[4], mr5 = sm[5];
+    wire [1:0]  mr0 = sm0, mr1 = sm1, mr2 = sm2,
+                 mr3 = sm3, mr4 = sm4, mr5 = sm5;
     // owning-master return this cycle (<=1 per master: 1 outstanding each)
     wire r0 = s_ack[0] && s_busy[0];
     wire r1 = s_ack[1] && s_busy[1];
@@ -241,8 +245,8 @@ module wb_ic (
             busy0 <= 1'b0; busy1 <= 1'b0; busy2 <= 1'b0;
             s_busy <= 5'b00000;
             nbusy  <= 1'b0;
-            sm[0] <= 2'd0; sm[1] <= 2'd0; sm[2] <= 2'd0; sm[3] <= 2'd0;
-            sm[4] <= 2'd0; sm[5] <= 2'd0;
+            sm0 <= 2'd0; sm1 <= 2'd0; sm2 <= 2'd0; sm3 <= 2'd0;
+            sm4 <= 2'd0; sm5 <= 2'd0;
             byp1_0 <= 1'b0; byp1_1 <= 1'b0; byp1_2 <= 1'b0;
         end else begin
             // ---- returns: clear busy (one cycle after slave ACK)
@@ -289,12 +293,12 @@ module wb_ic (
             byp1_2 <= g2 && bp2;
             if (grant) begin
                 case (gslv)
-                3'd0: begin s_busy[0] <= 1'b1; sm[0] <= gmst; end
-                3'd1: begin s_busy[1] <= 1'b1; sm[1] <= gmst; end
-                3'd2: begin s_busy[2] <= 1'b1; sm[2] <= gmst; end
-                3'd3: begin s_busy[3] <= 1'b1; sm[3] <= gmst; end
-                3'd4: begin s_busy[4] <= 1'b1; sm[4] <= gmst; end
-                3'd5: begin nbusy <= 1'b1;           sm[5] <= gmst; end
+                3'd0: begin s_busy[0] <= 1'b1; sm0 <= gmst; end
+                3'd1: begin s_busy[1] <= 1'b1; sm1 <= gmst; end
+                3'd2: begin s_busy[2] <= 1'b1; sm2 <= gmst; end
+                3'd3: begin s_busy[3] <= 1'b1; sm3 <= gmst; end
+                3'd4: begin s_busy[4] <= 1'b1; sm4 <= gmst; end
+                3'd5: begin nbusy <= 1'b1;           sm5 <= gmst; end
                 endcase
                 if      (gmst == 2'd0) busy0 <= 1'b1;
                 else if (gmst == 2'd1) busy1 <= 1'b1;

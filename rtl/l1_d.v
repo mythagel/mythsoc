@@ -1,6 +1,8 @@
-// l1_d -- 4 KiB direct-mapped L1 data cache (mythrv32)
+// l1_d -- direct-mapped L1 data cache (mythrv32)
 //
-// 1-word lines: 1024 x 32b. Index PA[11:2], tag PA[31:12].
+// 1-word lines: LINES x 32b (default 1024 = 4 KiB). Index PA[LB+1:2],
+// tag PA[31:LB+2], LB=$clog2(LINES). LINES shrinkable for synthesis
+// (board variant 64 lines), same rationale as l1_i.v.
 // Write-through; STORE miss writes memory directly (line NOT filled); store
 // hit writes line + writes through. LOAD miss fetches AND FILLS — but only
 // for the cacheable window (design.md sec.2: DRAM PA[31:22]==10'h200, plus
@@ -27,7 +29,10 @@
 
 `default_nettype none
 
-module l1_d (
+module l1_d #(
+    parameter integer LINES = 1024,
+    parameter integer LB    = $clog2(LINES)
+) (
     input clk, rst,
     input        REQ_I,
     input [3:0]  SEL_I,
@@ -50,19 +55,19 @@ module l1_d (
     localparam [9:0] DRAM_REG = 10'h200;   // PA[31:22] of DRAM (design.md sec.2)
     reg [1:0] st;
 
-    reg        v   [0:1023];
-    reg [19:0] tag [0:1023];
-    reg [31:0] mem [0:1023];
+    reg             v   [0:LINES-1];
+    reg [30-LB-1:0] tag [0:LINES-1];
+    reg [31:0]      mem [0:LINES-1];
 
     reg [31:0] adr_r, wd_r;
     reg [3:0]  sel_r;
     reg        wen_r;
 
-    wire [9:0]  idx = PA_I[11:2];
+    wire [LB-1:0] idx = PA_I[LB+1:2];
     // cacheable: DRAM (0x8000_0000) or ROM (0x0000_0000, immutable).
     // Devices (CLINT/PLIC/UART) must NEVER fill/hit: reads have side effects.
     wire        cacheable = (PA_I[31:22] == 10'h200) || (PA_I[31:22] == 10'h000);
-    wire       hit = cacheable && v[idx] && (tag[idx] == PA_I[31:12]);
+    wire       hit = cacheable && v[idx] && (tag[idx] == PA_I[31:LB+2]);
 
     assign STB_O = (st == W_W1S);
     assign SEL_O = (st == W_W1S) && wen_r ? sel_r : 4'b1111;
@@ -70,8 +75,11 @@ module l1_d (
     assign ADR_O = adr_r;
     assign WDAT_O = wd_r;
 
+    // SYNCHRONOUS reset: drives the v/tag/mem arrays (async-reset writer
+    // process => yosys register-list fallback, no $mem). Same reset-window
+    // parity argument as l1_i.v.
     integer i, j;
-    always @(posedge clk or posedge rst) begin
+    always @(posedge clk) begin
         if (rst) begin
             st <= W_IDLE;
             DONE_O <= 1'b0;
@@ -79,7 +87,7 @@ module l1_d (
             wd_r <= 32'h0;
             sel_r <= 4'h0;
             wen_r <= 1'b0;
-            for (i = 0; i < 1024; i = i + 1)
+            for (i = 0; i < LINES; i = i + 1)
                 v[i] <= 1'b0;
         end else begin
             DONE_O <= 1'b0;
@@ -114,9 +122,9 @@ module l1_d (
                     // load: data always from memory; fill ONLY cacheable lines
                     DATA_O <= DAT_I;
                     if (adr_r[31:22] == DRAM_REG || adr_r[31:22] == 10'h000) begin
-                        v[adr_r[11:2]] <= 1'b1;
-                        tag[adr_r[11:2]] <= adr_r[31:12];
-                        mem[adr_r[11:2]] <= DAT_I;
+                        v[adr_r[LB+1:2]] <= 1'b1;
+                        tag[adr_r[LB+1:2]] <= adr_r[31:LB+2];
+                        mem[adr_r[LB+1:2]] <= DAT_I;
                     end
                 end
                 DONE_O <= 1'b1;

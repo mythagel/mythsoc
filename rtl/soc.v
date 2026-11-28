@@ -4,7 +4,8 @@
 // (m0=I-cache, m1=D-cache, m2=MMU walk) through the pipelined interconnect
 // (wb_ic) to the five slaves:
 //   s0 ROM   (boot, base 0x0000_0000, 32 KiB)
-//   s1 DRAM  (base 0x8000_0000, 4 MiB)
+//   s1 DRAM  (base 0x8000_0000, 4 MiB): wb_ram when DRAM_SDRAM=0 (sim),
+//            wb_sdram controller when DRAM_SDRAM=1 (board; pads below)
 //   s2 UART  (16550, base 0x1000_0000)
 //   s3 CLINT (base 0x0200_0000)
 //   s4 PLIC  (base 0x0C00_0000)
@@ -24,16 +25,44 @@
 // is left unconnected.
 `default_nettype none
 
+// DRAM_SDRAM default is macro-driven so the SYNTHESIS ELABORATION of this
+// module can select the board path before any instance override happens:
+// yosys elaborates generate blocks at READ time with the module's own
+// (default) parameters -- the derived per-instance copy (top.v passes
+// DRAM_SDRAM=1) comes later. Without this, the base \soc elaborates
+// wb_ram #(.DEPTH(1048576)) = a 32 Mbit register list (yosys OOM; it
+// killed the session-27 synth attempt). The board flow reads the file list
+// WITHOUT rtl/wb_ram.v and adds -DDRAM_SDRAM_DEFAULT=1 (Makefile synth);
+// simulations never define the macro and keep parameter-driven choice.
+`ifndef DRAM_SDRAM_DEFAULT
+  `define DRAM_SDRAM_DEFAULT 0
+`endif
+
 module soc #(
     parameter ROM_DEPTH  = 8192,
     parameter ROM_HEX    = "",
-    parameter RAM_DEPTH  = 1048576,   // board: 4 MiB/4; sim may reduce
+    parameter RAM_DEPTH  = 1048576,   // wb_ram path only; sim TBs reduce
     parameter UART_CLK   = 25_000_000,
-    parameter UART_BAUD  = 115_200
+    parameter UART_BAUD  = 115_200,
+    parameter CLK_HZ     = 25_000_000,  // sysclk frequency (wb_sdram timing)
+    parameter DRAM_SDRAM = `DRAM_SDRAM_DEFAULT, // 0: wb_ram (sim); 1: wb_sdram (board/synth)
+    parameter integer LINES_I = 1024, // I$ lines
+    parameter integer LINES_D = 1024  // D$ lines
 )(
     input clk, rst,
     input  uart_rxd,
-    output uart_txd
+    output uart_txd,
+
+    // SDRAM pads (active with DRAM_SDRAM=1; the board top owns sd_clk and
+    // the dq tristate -- wb_sdram drives registered outputs only, sec.6a)
+    output [1:0]  sd_ba_o,
+    output [12:0] sd_a_o,
+    output        sd_ras_n_o, sd_cas_n_o, sd_we_n_o,
+    output        sd_cs_n_o, sd_cke_o,
+    output [3:0]  sd_dqm_o,
+    output [31:0] sd_dq_o,
+    output        sd_dq_oe_o,
+    input  [31:0] sd_dq_i
 );
 
     // ------------------------------------------------------------- core
@@ -46,7 +75,7 @@ module soc #(
     wire [31:0] m0_dat, m1_dat, m2_dat;
     wire        meip, seip;
 
-    core core0 (
+    core #(.LINES_I(LINES_I), .LINES_D(LINES_D)) core0 (
         .clk(clk), .rst(rst),
         .meip(meip), .seip(seip),
         .m0_stb(m0_stb), .m0_sel(m0_sel), .m0_adr(m0_adr), .m0_we(m0_we),
@@ -65,9 +94,9 @@ module soc #(
     wire        s0_ack, s1_ack, s2_ack, s3_ack, s4_ack;
     wire [31:0] s0_rdat, s1_rdat, s2_rdat, s3_rdat, s4_rdat;
 
-    assign ic_m0_stall = 1'b0;
-    assign ic_m1_stall = 1'b0;
-    assign ic_m2_stall = 1'b0;
+    // ic_m*_stall are wb_ic OUTPUTS left dangling (masters are 1-outstanding;
+    // FIFO depth 4 can never fill). No constant drivers here: iverilog
+    // tolerated the multi-driven net (const-0 + cell output), yosys errors.
 
     wb_ic ic0 (
         .clk(clk), .rst(rst),
@@ -94,10 +123,24 @@ module soc #(
         .clk(clk), .rst(rst), .STB_I(s0_stb), .WE_I(s0_we), .SEL_I(s0_sel),
         .ADR_I(s0_adr), .DAT_I(s0_wdat), .ACK_O(s0_ack), .DAT_O(s0_rdat)
     );
-    wb_ram #(.DEPTH(RAM_DEPTH)) s1ram (
-        .clk(clk), .rst(rst), .STB_I(s1_stb), .WE_I(s1_we), .SEL_I(s1_sel),
-        .ADR_I(s1_adr), .DAT_I(s1_wdat), .ACK_O(s1_ack), .DAT_O(s1_rdat)
-    );
+    generate
+    if (DRAM_SDRAM) begin : g_dram_sdram
+        wb_sdram #(.CLK_FREQ(CLK_HZ)) s1sdram (
+            .clk(clk), .rst(rst), .STB_I(s1_stb), .WE_I(s1_we), .SEL_I(s1_sel),
+            .ADR_I(s1_adr), .DAT_I(s1_wdat), .ACK_O(s1_ack), .DAT_O(s1_rdat),
+            .sd_ba_o(sd_ba_o), .sd_a_o(sd_a_o),
+            .sd_ras_n_o(sd_ras_n_o), .sd_cas_n_o(sd_cas_n_o),
+            .sd_we_n_o(sd_we_n_o), .sd_cs_n_o(sd_cs_n_o), .sd_cke_o(sd_cke_o),
+            .sd_dqm_o(sd_dqm_o), .sd_dq_o(sd_dq_o), .sd_dq_oe_o(sd_dq_oe_o),
+            .sd_dq_i(sd_dq_i)
+        );
+    end else begin : g_dram_ram
+        wb_ram #(.DEPTH(RAM_DEPTH)) s1ram (
+            .clk(clk), .rst(rst), .STB_I(s1_stb), .WE_I(s1_we), .SEL_I(s1_sel),
+            .ADR_I(s1_adr), .DAT_I(s1_wdat), .ACK_O(s1_ack), .DAT_O(s1_rdat)
+        );
+    end
+    endgenerate
 
     wire        uart_irq;
     wire [5:0]  clint_ip;
@@ -117,6 +160,7 @@ module soc #(
 
     // PLIC IRQ fan-in (bit N = source N, N=1..16; see design.md sec.3)
     wire [16:0] plic_irq;
+    assign plic_irq[0]  = 1'b0;         // src 0 does not exist (spec ch.6)
     assign plic_irq[1]  = uart_irq;
     assign plic_irq[2]  = clint_ip[0];    // ip_ssw
     assign plic_irq[3]  = clint_ip[1];    // ip_msw

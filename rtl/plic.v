@@ -108,7 +108,10 @@ module plic (
     wire comp_ok = (comp_id >= 10'd1) && (comp_id <= 10'd16);
 
     // ------------------------------------------------------------- update
-    always @(posedge clk or posedge rst) begin
+    // SYNCHRONOUS reset: drives the prio/ip/arm/en/thr storage arrays --
+    // an async-reset writer process makes yosys replace them with register
+    // lists (no $mem). Reset held across >=2 rising edges in every TB.
+    always @(posedge clk) begin
         if (rst) begin
             for (n = 0; n < 16; n = n + 1) begin
                 prio[n] <= 32'h0;

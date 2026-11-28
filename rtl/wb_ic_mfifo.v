@@ -26,7 +26,11 @@ module wb_ic_mfifo (
     assign cnt  = c;
     assign full = (c == 3'd4);
 
-    always @(posedge clk or posedge rst) begin
+    // SYNCHRONOUS reset: the e[] entries make this the array-writer
+    // process; clk-only keeps it $mem-inferable (async-reset writers get
+    // replaced by a register list). Entry array is fully reset to 0 here,
+    // so the sync clear preserves the old defined-state behavior.
+    always @(posedge clk) begin
         if (rst) begin
             c   <= 3'd0;
             e[0] <= 69'h0;

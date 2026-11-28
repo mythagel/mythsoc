@@ -3,10 +3,13 @@
 #
 # usage:
 #   make regress              full suite, continue-on-fail, pass-marker checked
-#                             (mmu l1_i l1_d wb_ic 16550 clint plic core c8
-#                              t01 t02 t03 t04 t05 t06 t07 soc)
+#                             (mmu l1_i l1_d wb_ic 16550 clint plic sdram core
+#                              c8 t01 t02 t03 t04 t05 t06 t07 soc)
 #   make <name>               build + run one bench (same names)
 #   make images               rebuild all generated ROM/golden artifacts only
+#   make lpfcheck             LPF pin sites vs board hardware doc (tool)
+#   make synth pnr fmax bit   ECP5 hardware flow (design.md sec.11)
+#   make prog | flash         load via dirtyJtag (SRAM | SPI flash)
 #   make clean                remove build/ + sim output
 # knobs:
 #   OUT=dir       vvp binaries + sim logs      (default /tmp/opencode/regress)
@@ -14,6 +17,9 @@
 #   RUNS=n        t06 Dhrystone iterations     (default 100)
 #                 (RUNS is baked via -DDRY_RUNS; make won't notice a changed
 #                 flag by itself -- `touch tests/dry1.c` to force the rebuild)
+#   PNR_FREQ=n    nextpnr target MHz for the hardware flow  (default 60)
+#   ROM_IMG=f     ROM hex synthesized into BRAM (default tb/t_fw_demo.hex;
+#                 test battery on hardware: ROM_IMG=tb/t_fw_t05.hex)
 #
 # Artifacts live where the TBs expect them (hardcoded paths in tb/*.v):
 #   tb/tb_core.hex/_exp.vh/_irq.vh  tb/tb_c8.hex/_exp.vh  tb/tb_soc_fw.hex
@@ -44,6 +50,12 @@ IVFLAGS   := -g2005
 RTL      := rtl/soc.v rtl/core.v rtl/mmu.v rtl/l1_i.v rtl/l1_d.v rtl/wb_ic.v \
             rtl/wb_ic_mfifo.v rtl/wb_rom.v rtl/wb_ram.v rtl/16550.v \
             rtl/clint.v rtl/plic.v
+# Board/synth list: NO rtl/wb_ram.v (sim-only DRAM model; the board path is
+# wb_sdram). rtl/soc.v's DRAM_SDRAM_DEFAULT macro makes the base-module
+# elaboration pick the sdram branch, so wb_ram is never referenced/synthed.
+BOARD_RTL := rtl/soc.v rtl/core.v rtl/mmu.v rtl/l1_i.v rtl/l1_d.v \
+             rtl/wb_ic.v rtl/wb_ic_mfifo.v rtl/wb_rom.v rtl/16550.v \
+             rtl/clint.v rtl/plic.v rtl/wb_sdram.v rtl/top.v
 CORE_RTL := rtl/core.v rtl/mmu.v rtl/l1_i.v rtl/l1_d.v
 
 EMU       := tools/emu32.py
@@ -51,13 +63,14 @@ BIN2HEX   := tools/bin2hex.py
 FW_RANGES := tools/fw_ranges.py
 LDS       := scripts/link.lds
 
-TESTS := mmu l1_i l1_d wb_ic 16550 clint plic sdram core c8 t01 t02 t03 t04 t05 t06 t07 soc
+TESTS := mmu l1_i l1_d wb_ic 16550 clint plic sdram core c8 t01 t02 t03 t04 t05 t06 t07 soc soc_sdram
 IMAGES := tb/tb_core.hex tb/tb_core_exp.vh tb/tb_core_irq.vh \
           tb/tb_c8.hex tb/tb_c8_exp.vh \
           tb/t_fw_t01.hex tb/t_fw_t02.hex tb/t_fw_t03.hex tb/t_fw_t04.hex \
           tb/t_fw_t05.hex tb/t_fw_t06.hex tb/t_fw_t07.hex tb/tb_soc_fw.hex
 
-.PHONY: all images regress clean $(TESTS)
+.PHONY: all images regress clean lpfcheck synth pnr fmax bit prog flash \
+        $(TESTS)
 
 all: images
 
@@ -104,7 +117,7 @@ $(OUT)/clint.vvp: tb/tb_clint.v rtl/clint.v | $(OUT)
 	$(IV) $(IVFLAGS) -s tb_clint $^ -o $@
 $(OUT)/plic.vvp:  tb/tb_plic.v  rtl/plic.v  | $(OUT)
 	$(IV) $(IVFLAGS) -s tb_plic  $^ -o $@
-$(OUT)/sdram.vvp: tb/tb_wb_sdram.v rtl/wb_sdram.v tb/sdram_params.vh | $(OUT)
+$(OUT)/sdram.vvp: tb/tb_wb_sdram.v tb/sdram_model.v rtl/wb_sdram.v tb/sdram_params.vh | $(OUT)
 	$(IV) $(IVFLAGS) -s tb_wb_sdram $^ -o $@
 
 # SDRAM timing header: tools/sdram_calc.py is the source of truth (the TB
@@ -117,6 +130,10 @@ $(OUT)/core.vvp: tb/tb_core.v $(CORE_RTL) tb/tb_core_exp.vh tb/tb_core_irq.vh | 
 	$(IV) $(IVFLAGS) -s tb_core tb/tb_core.v $(CORE_RTL) -o $@
 $(OUT)/c8.vvp:   tb/tb_c8.v   $(CORE_RTL) tb/tb_c8_exp.vh | $(OUT)
 	$(IV) $(IVFLAGS) -s tb_c8   tb/tb_c8.v $(CORE_RTL)   -o $@
+
+$(OUT)/soc_sdram.vvp: tb/tb_soc_sdram.v tb/sdram_model.v $(RTL) rtl/wb_sdram.v \
+                      tb/sdram_params.vh | $(OUT)
+	$(IV) $(IVFLAGS) -s tb_soc_sdram -DROM_HEX='"tb/t_fw_t01.hex"' $^ -o $@
 
 # tb_fw reads its ROM at sim start -> the hex is a RUN dep, not a build dep.
 $(OUT)/t01.vvp: tb/tb_fw.v $(RTL) | $(OUT)
@@ -173,6 +190,8 @@ t07:   $(OUT)/t07.vvp tb/t_fw_t07.hex
 	@$(call run,t07)
 soc:   $(OUT)/soc.vvp tb/tb_soc_fw.hex
 	@$(call run,soc)
+soc_sdram: $(OUT)/soc_sdram.vvp tb/t_fw_t01.hex
+	@$(call run,soc_sdram)
 
 regress:
 	@fail=0; \
@@ -293,6 +312,17 @@ tb/t_fw_t05.hex: $(B)/c/t05.bin
 	  || { echo "RANGE-FAIL: fix SPANs in tests/t05_soc.c"; exit 1; }
 	@echo "built $@ ($$(wc -l < $@) words)"
 
+# board demo image (ROM default for `make bit`; NOT part of regress).
+$(B)/c/board_demo.elf: $(B)/c/e.o $(B)/c/board_demo.o $(B)/c/r.o
+	$(CC) $(RV) -nostdlib -T $(LDS) -e _start -o $@ $^
+	@$(call check_fw,$@)
+$(B)/c/board_demo.bin: $(B)/c/board_demo.elf
+	$(OC) --only-section=.text --only-section=.data -O binary $< $@
+tb/t_fw_demo.hex: $(B)/c/board_demo.bin
+	@$(PY) $(BIN2HEX) $< $@
+	@$(call check_rom,$(B)/c/board_demo.bin)
+	@echo "built $@ ($$(wc -l < $@) words)"
+
 # Dhrystone flow (was scripts/dry_build.sh). $(OD) call-fidelity checks below
 # guard the measurement: strcpy/strcmp/... must survive as real calls.
 DRY_EXPORTS := Proc_1 Proc_2 Proc_3 Proc_4 Proc_5 Proc_6 Proc_7 Proc_8 \
@@ -338,6 +368,64 @@ $(B)/tb_soc_fw.bin: $(B)/tb_soc_fw.elf
 tb/tb_soc_fw.hex: $(B)/tb_soc_fw.bin
 	@$(PY) $(BIN2HEX) $< $@
 	@echo "built $@ ($$(wc -l < $@) words)"
+
+# ---- hardware: synth -> pnr(+fmax gate) -> bitstream ------------------------
+# design.md sec.11 flow. ROM image is $readmemh'd at SYNTH time (top.v
+# parameter ROM_HEX; knob: make bit ROM_HEX=tb/t_fw_t03.hex, image must
+# exist: `make images` builds all of them).
+# Fmax gate (sec.10F/1): HARD MIN 25 MHz (board crystal), target 60,
+# ideal 80. P&R optimizes toward PNR_FREQ; tools/fmax.py reports + gates.
+# Load (design.md sec.1): openFPGALoader --cable dirtyJtag (prog=SRAM,
+# flash=SPI, erases flash). board/openocd.cfg is the SVF fallback.
+PNR_FREQ ?= 60
+LPF      := lpf/mythrv32-5a-75b-v82.lpf
+ROM_IMG  ?= tb/t_fw_demo.hex
+# Synthesis-variant geometry (FF budget on LFE5U-25F; see notes/synth.md).
+# Simulation keeps RTL defaults (8192-word ROM, 1024-line caches).
+ROM_DEPTH  ?= 1024        # ROM words; ROM_IMG must fit
+CACHE_LINES ?= 64         # L1 lines per cache (I and D)
+
+lpfcheck:
+	$(PY) tools/lpf_check.py $(LPF) rtl/top.v
+
+synth: $(B)/top.json
+$(B)/top.json: $(BOARD_RTL) $(ROM_IMG) | $(B)
+	yosys -l $(B)/yosys.log -p "read_verilog -DDRAM_SDRAM_DEFAULT=1 $(BOARD_RTL); \
+	  chparam -set ROM_HEX \"$(ROM_IMG)\" top; \
+	  chparam -set ROM_DEPTH $(ROM_DEPTH) top; \
+	  chparam -set LINES_I $(CACHE_LINES) top; \
+	  chparam -set LINES_D $(CACHE_LINES) top; \
+	  synth_ecp5 -top top -abc9 -json $@"
+	@if grep -q "wb_ram" $(B)/yosys.log; then \
+	  echo "GATE-FAIL: wb_ram present in the synth design"; exit 1; fi
+	@if grep "Replacing memory" $(B)/yosys.log | grep -vE "rtl/(plic|wb_sdram)\.v" | grep -q .; then \
+	  echo "GATE-FAIL: unexpected 'Replacing memory ... register list' (yosys.log"; \
+	  echo "  plic ip/arm + wb_sdram sr_dat are INTENTIONAL small FF arrays)"; exit 1; fi
+	@test $$(wc -l < $(ROM_IMG)) -le $(ROM_DEPTH) || { \
+	  echo "GATE-FAIL: $(ROM_IMG) exceeds ROM_DEPTH=$(ROM_DEPTH) words"; exit 1; }
+	@grep -E "Number of cells|Number of memories|Number of memory bits|SB_|ERROR" $(B)/yosys.log | tail -6 | sed 's/^/  /'
+
+pnr: $(B)/top.config
+$(B)/top.config: $(B)/top.json $(LPF) | $(B)
+	nextpnr-ecp5 --25k --package CABGA256 --speed 6 --lpf $(LPF) \
+	  --json $(B)/top.json --textcfg $@ --freq $(PNR_FREQ) \
+	  --report $(B)/pnr.json > $(B)/pnr.log 2>&1 \
+	  || { echo "PNR-FAIL (see $(B)/pnr.log)"; tail -10 $(B)/pnr.log; exit 1; }
+	@echo "  pnr: $$(grep -m1 'Max frequency' $(B)/pnr.log)"
+
+fmax: $(B)/top.config
+	@$(PY) tools/fmax.py $(B)/pnr.log $(B)/pnr.json
+
+bit: $(B)/top.bit $(B)/top.svf
+$(B)/top.bit &: $(B)/top.config
+	ecppack --compress --input $< --bit $(B)/top.bit --svf $(B)/top.svf
+	@ls -la $(B)/top.bit $(B)/top.svf | sed 's/^/  /'
+
+prog: $(B)/top.bit            # SRAM load (volatile; lost on power-cycle)
+	openFPGALoader --cable dirtyJtag --freq 1000000 $<
+
+flash: $(B)/top.bit           # SPI flash U31 (ERASES existing contents!)
+	openFPGALoader --cable dirtyJtag --freq 1000000 -f $<
 
 images: $(IMAGES)
 

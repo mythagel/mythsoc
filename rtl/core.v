@@ -22,7 +22,10 @@
 // mstatus.MIE=0, satp=0, all pipeline regs cleared (x0=0, regs=0).
 `default_nettype none
 
-module core (
+module core #(
+    parameter integer LINES_I = 1024,   // I$ lines (synth variant shrinks)
+    parameter integer LINES_D = 1024    // D$ lines
+) (
     input clk, rst,
     // interrupt pending (C6; unused now)
     input meip, seip,
@@ -248,12 +251,7 @@ module core (
             inval_p <= inval_go ? 1'b1 : (!lio ? 1'b0 : inval_p);
             d_mio <= (d_mio || (flush && mio)) && !mmu_done;
             d_lio <= (d_lio || (flush && lio)) && !l1_done;
-            if (enq) begin
-                fq_data[fq_w[1:0]] <= (syn && !fresh_l1) ? FMARK : l1_data;
-                fq_pc  [fq_w[1:0]] <= (syn && !fresh_l1) ? pc_syn : pc_l1;
-                fq_pf  [fq_w[1:0]] <= syn && !fresh_l1;
-                fq_w <= fq_w + 3'd1;
-            end
+            if (enq) fq_w <= fq_w + 3'd1;
             if (deq) fq_r <= fq_r + 3'd1;
             if (flush) begin fq_w <= 3'd0; fq_r <= 3'd0; end
             fq_c <= flush ? 3'd0 : fq_c_next;
@@ -262,6 +260,20 @@ module core (
             if (fresh_mmu && !((req_l1 || syn) && !pav)) pc_pav <= pc_mmu;
             if (redirect)      fpc <= redirect_pc;
             else if (req_mmu)  fpc <= fpc + 32'h4;
+        end
+    end
+
+    // fq_* storage: dedicated single-writer process (Cummings G6: one
+    // sequential process per array/variable; G1: nonblocking only). Must
+    // stay clk-only: an async-reset writer process makes yosys replace the
+    // arrays with register lists (frontend fallback, no $mem). Entries need
+    // no reset clear -- reads are pointer-gated (deq requires fq_c>0), so
+    // an entry is always written before it is read.
+    always @(posedge clk) begin
+        if (enq) begin
+            fq_data[fq_w[1:0]] <= (syn && !fresh_l1) ? FMARK : l1_data;
+            fq_pc  [fq_w[1:0]] <= (syn && !fresh_l1) ? pc_syn : pc_l1;
+            fq_pf  [fq_w[1:0]] <= syn && !fresh_l1;
         end
     end
 
@@ -331,7 +343,7 @@ module core (
     assign grant_i = !mmd_want && !mmd_busy;
 
     // I-cache: 1-AHEAD requests on consecutive cycles are legal on hits.
-    l1_i l1i (
+    l1_i #(.LINES(LINES_I)) l1i (
         .clk(clk), .rst(rst),
         .REQ_I(req_l1), .PA_I(mmu_pa), .INVAL_I(inval_p),
         .DONE_O(l1_done), .DATA_O(l1_data),
@@ -342,7 +354,7 @@ module core (
     // D-cache: idle until C4.
     wire       mld_done;
     wire [31:0] mld_data;
-    l1_d l1d (
+    l1_d #(.LINES(LINES_D)) l1d (
         .clk(clk), .rst(rst),
         .REQ_I(req_ld), .SEL_I(store_sel), .PA_I(exma_pa),
         .WEN_I(exma_st), .WDAT_I(store_wd),
@@ -585,8 +597,13 @@ module core (
     // no younger writer can precede the held producer).
     wire        rf_we_w = mawb_wr && (mawb_rd != 5'h0);
 
+    // rf storage: clk-only process (async-reset array writers make yosys
+    // fall back to a register list with no $mem; clk-only infers the
+    // 2-write/2-read $mem and memory_map builds the same FF array). Reset
+    // clears via the first rising edge(s) of rst -- held >=2 edges in
+    // every TB and in the board POR, so release-time state is identical.
     integer i;
-    always @(posedge clk or posedge rst) begin
+    always @(posedge clk) begin
         if (rst) begin
             for (i = 0; i < 32; i = i + 1) rf[i] <= 32'h0;
         end else if (rf_we_a && (rf_waddr_a != 5'h0)) begin

@@ -1,0 +1,120 @@
+# mythrv32 -- Colorlight 5a-75b v8.2 (LFE5U-25F CABGA256) pin constraints.
+# Sites verified against ~/dev/project/chubby75/5a-75b/hardware_V8.2.md
+# (cross-check: tools/lpf_check.py). Usage: nextpnr-ecp5 --lpf (Makefile).
+
+# clock / user I/O
+LOCATE COMP "clk_i"  SITE "P6";   # 25 MHz from phy1 -- never reset the PHYs
+IOBUF  PORT "clk_i"  IO_TYPE=LVCMOS33;
+LOCATE COMP "key_i"  SITE "R7";   # KEY+, pressed=0 (10k pull-up on board)
+IOBUF  PORT "key_i"  IO_TYPE=LVCMOS33 PULLMODE=UP;
+LOCATE COMP "led_o"  SITE "T6";   # DATA_LED-, active low
+IOBUF  PORT "led_o"  IO_TYPE=LVCMOS33;
+LOCATE COMP "phy_rst_n" SITE "R6";
+IOBUF  PORT "phy_rst_n" IO_TYPE=LVCMOS33;
+
+# 16550 (J1 header area; C4 wired to the USB-serial adapter)
+LOCATE COMP "uart_txd" SITE "C4";
+IOBUF  PORT "uart_txd" IO_TYPE=LVCMOS33;
+LOCATE COMP "uart_rxd" SITE "D4";
+IOBUF  PORT "uart_rxd" IO_TYPE=LVCMOS33 PULLMODE=UP;
+
+# SDRAM U29 (M12L64322A 2Mx32). CS#/CKE/DQM0..3 hard-wired on v8.2 -> no pads.
+LOCATE COMP "sd_clk_o"   SITE "C8";
+LOCATE COMP "sd_ras_n_o" SITE "B6";
+LOCATE COMP "sd_cas_n_o" SITE "A6";
+LOCATE COMP "sd_we_n_o"  SITE "B5";
+LOCATE COMP "sd_ba_o[0]" SITE "B7";
+LOCATE COMP "sd_ba_o[1]" SITE "A8";
+LOCATE COMP "sd_a_o[0]"  SITE "A9";
+LOCATE COMP "sd_a_o[1]"  SITE "B9";
+LOCATE COMP "sd_a_o[2]"  SITE "B10";
+LOCATE COMP "sd_a_o[3]"  SITE "C10";
+LOCATE COMP "sd_a_o[4]"  SITE "D9";
+LOCATE COMP "sd_a_o[5]"  SITE "C9";
+LOCATE COMP "sd_a_o[6]"  SITE "E9";
+LOCATE COMP "sd_a_o[7]"  SITE "D8";
+LOCATE COMP "sd_a_o[8]"  SITE "E8";
+LOCATE COMP "sd_a_o[9]"  SITE "C7";
+LOCATE COMP "sd_a_o[10]" SITE "B8";
+
+LOCATE COMP "sd_dq_io[0]"  SITE "B2";
+LOCATE COMP "sd_dq_io[1]"  SITE "A2";
+LOCATE COMP "sd_dq_io[2]"  SITE "C3";
+LOCATE COMP "sd_dq_io[3]"  SITE "A3";
+LOCATE COMP "sd_dq_io[4]"  SITE "B3";
+LOCATE COMP "sd_dq_io[5]"  SITE "A4";
+LOCATE COMP "sd_dq_io[6]"  SITE "B4";
+LOCATE COMP "sd_dq_io[7]"  SITE "A5";
+LOCATE COMP "sd_dq_io[8]"  SITE "E7";
+LOCATE COMP "sd_dq_io[9]"  SITE "C6";
+LOCATE COMP "sd_dq_io[10]" SITE "D7";
+LOCATE COMP "sd_dq_io[11]" SITE "D6";
+LOCATE COMP "sd_dq_io[12]" SITE "E6";
+LOCATE COMP "sd_dq_io[13]" SITE "D5";
+LOCATE COMP "sd_dq_io[14]" SITE "C5";
+LOCATE COMP "sd_dq_io[15]" SITE "E5";
+LOCATE COMP "sd_dq_io[16]" SITE "A11";
+LOCATE COMP "sd_dq_io[17]" SITE "B11";
+LOCATE COMP "sd_dq_io[18]" SITE "B12";
+LOCATE COMP "sd_dq_io[19]" SITE "A13";
+LOCATE COMP "sd_dq_io[20]" SITE "B13";
+LOCATE COMP "sd_dq_io[21]" SITE "A14";
+LOCATE COMP "sd_dq_io[22]" SITE "B14";
+LOCATE COMP "sd_dq_io[23]" SITE "D14";
+LOCATE COMP "sd_dq_io[24]" SITE "D13";
+LOCATE COMP "sd_dq_io[25]" SITE "E11";
+LOCATE COMP "sd_dq_io[26]" SITE "C13";
+LOCATE COMP "sd_dq_io[27]" SITE "D11";
+LOCATE COMP "sd_dq_io[28]" SITE "C12";
+LOCATE COMP "sd_dq_io[29]" SITE "E10";
+LOCATE COMP "sd_dq_io[30]" SITE "C11";
+LOCATE COMP "sd_dq_io[31]" SITE "D10";
+IOBUF PORT "sd_clk_o" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_ras_n_o" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_cas_n_o" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_we_n_o" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_ba_o[0]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_ba_o[1]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_a_o[0]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_a_o[1]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_a_o[2]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_a_o[3]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_a_o[4]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_a_o[5]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_a_o[6]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_a_o[7]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_a_o[8]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_a_o[9]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_a_o[10]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_dq_io[0]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_dq_io[1]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_dq_io[2]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_dq_io[3]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_dq_io[4]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_dq_io[5]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_dq_io[6]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_dq_io[7]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_dq_io[8]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_dq_io[9]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_dq_io[10]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_dq_io[11]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_dq_io[12]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_dq_io[13]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_dq_io[14]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_dq_io[15]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_dq_io[16]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_dq_io[17]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_dq_io[18]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_dq_io[19]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_dq_io[20]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_dq_io[21]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_dq_io[22]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_dq_io[23]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_dq_io[24]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_dq_io[25]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_dq_io[26]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_dq_io[27]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_dq_io[28]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_dq_io[29]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_dq_io[30]" IO_TYPE=LVCMOS33;
+IOBUF PORT "sd_dq_io[31]" IO_TYPE=LVCMOS33;

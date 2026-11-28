@@ -264,6 +264,8 @@ module wb_sdram #(
 
     always @(*) begin
         ncmd = C_NOP; nba = 2'b00; na = 13'h0; ndq = 32'h0; spec_now = 1'b0;
+        b = 0; s = 0;   // loop-index defaults: assigned-but-not-on-all-paths
+                        // in the PRE/ring loops below would infer latches
         if (ist == 2'd3 && rfc_ok) begin
             // ---- 1. in-flight head chains complete even while ref_due
             // (rfs_drain WAITS on them; blocking them would deadlock) ----
@@ -341,7 +343,12 @@ module wb_sdram #(
     end
 
     // =========================================================== seq block
-    always @(posedge clk or posedge rst) begin : SEQ
+    // SYNCHRONOUS reset: the only block with rst held across >=2 edges
+    // here; driving the bank/ring storage arrays (ts_act/ts_pre/ts_rd/
+    // ts_rd_v/orow, sr_*), it must be clk-only so those stay $mems
+    // (async-reset writer processes fall back to register lists). The
+    // board POR (~2.6 ms) dwarfs T_INIT anyway.
+    always @(posedge clk) begin : SEQ
         integer k;
         if (rst) begin
             q0_v<=0; q0_we<=0; q0_sel<=0; q0_ad<=0; q0_dat<=0;

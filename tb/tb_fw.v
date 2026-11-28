@@ -46,7 +46,7 @@ module tb_fw;
     task dram_dump();
         begin
             for (di = 0; di < 116; di = di + 1)
-                $display("  dram[%0d] = %h", di, dut.s1ram.mem[di]);
+                $display("  dram[%0d] = %h", di, dut.g_dram_ram.s1ram.mem[di]);
         end
     endtask
 
@@ -61,8 +61,8 @@ module tb_fw;
             end
             $display("");
             for (rgv = 0; rgv < 16; rgv = rgv + 1)
-                $display("  sav_s[%0d]=%h", rgv, dut.s1ram.mem[1024 + rgv]);
-            $display("  g_abort=%h", dut.s1ram.mem[15360]);
+                $display("  sav_s[%0d]=%h", rgv, dut.g_dram_ram.s1ram.mem[1024 + rgv]);
+            $display("  g_abort=%h", dut.g_dram_ram.s1ram.mem[15360]);
         end
     endtask
 
@@ -274,10 +274,10 @@ module tb_fw;
             $display("ENT %s n=%0d id=%0d epc=%h priv=%b meip=%b seip=%b pend=%b ip_stmr=%b ip_mtmr=%b mtip=%b msip=%b sstip=%b mtc=%h stc=%h mtc32=%h t=%h",
                      (mn ? "M" : "S"),
                      (mn ? (mn - 1) : (sn - 1)),
-                     (mn ? dut.s1ram.mem[22 + 3 * (mn - 1)]
-                         : dut.s1ram.mem[103 + 3 * (sn - 1)]),
-                     (mn ? dut.s1ram.mem[23 + 3 * (mn - 1)]
-                         : dut.s1ram.mem[104 + 3 * (sn - 1)]),
+                     (mn ? dut.g_dram_ram.s1ram.mem[22 + 3 * (mn - 1)]
+                         : dut.g_dram_ram.s1ram.mem[103 + 3 * (sn - 1)]),
+                     (mn ? dut.g_dram_ram.s1ram.mem[23 + 3 * (mn - 1)]
+                         : dut.g_dram_ram.s1ram.mem[104 + 3 * (sn - 1)]),
                      dut.core0.priv, dut.core0.meip, dut.core0.seip,
                      dut.s4plic.pendb, dut.s3clint.ip_stmr, dut.s3clint.ip_mtmr,
                      dut.s3clint.mtip[0], dut.s3clint.msip[0], dut.s3clint.sstip[0],
@@ -291,12 +291,12 @@ module tb_fw;
             forever begin
                 @(negedge clk);
                 tn = tn + 1;
-                if (dut.s1ram.mem[20] !== tr_mn) begin
-                    tr_mn = dut.s1ram.mem[20];
+                if (dut.g_dram_ram.s1ram.mem[20] !== tr_mn) begin
+                    tr_mn = dut.g_dram_ram.s1ram.mem[20];
                     ent_trace(tr_mn, tr_sn);
                 end
-                if (dut.s1ram.mem[101] !== tr_sn) begin
-                    tr_sn = dut.s1ram.mem[101];
+                if (dut.g_dram_ram.s1ram.mem[101] !== tr_sn) begin
+                    tr_sn = dut.g_dram_ram.s1ram.mem[101];
                     ent_trace(tr_mn, tr_sn);
                 end
             end
@@ -411,20 +411,20 @@ module tb_fw;
                              dut.core0.xret_pc, dut.core0.priv,
                              dut.core0.mstatus);
                 for (bmw = 16; bmw <= 20; bmw = bmw + 1)
-                    if (dut.s1ram.mem[bmw] !== bm_old[bmw]) begin
+                    if (dut.g_dram_ram.s1ram.mem[bmw] !== bm_old[bmw]) begin
                         $display("RW  t=%h w=%0d v=%h fpc=%h priv=%b",
                                  dut.s3clint.mtime[31:0], bmw,
-                                 dut.s1ram.mem[bmw], dut.core0.fpc,
+                                 dut.g_dram_ram.s1ram.mem[bmw], dut.core0.fpc,
                                  dut.core0.priv);
-                        bm_old[bmw] = dut.s1ram.mem[bmw];
+                        bm_old[bmw] = dut.g_dram_ram.s1ram.mem[bmw];
                     end
                 for (bmw = 100; bmw <= 110; bmw = bmw + 1)
-                    if (dut.s1ram.mem[bmw] !== bm_old[bmw]) begin
+                    if (dut.g_dram_ram.s1ram.mem[bmw] !== bm_old[bmw]) begin
                         $display("RW  t=%h w=%0d v=%h fpc=%h priv=%b",
                                  dut.s3clint.mtime[31:0], bmw,
-                                 dut.s1ram.mem[bmw], dut.core0.fpc,
+                                 dut.g_dram_ram.s1ram.mem[bmw], dut.core0.fpc,
                                  dut.core0.priv);
-                        bm_old[bmw] = dut.s1ram.mem[bmw];
+                        bm_old[bmw] = dut.g_dram_ram.s1ram.mem[bmw];
                     end
             end
         end
@@ -660,13 +660,13 @@ module tb_fw;
 
         // wait for the result marker (DRAM word 1, written last) + watchdog
         t = 0;
-        while (dut.s1ram.mem[1] !== {16'h5A5A, 16'h0000} && t < `WDT) begin
+        while (dut.g_dram_ram.s1ram.mem[1] !== {16'h5A5A, 16'h0000} && t < `WDT) begin
             @(negedge clk); t = t + 1;
         end
-        if (dut.s1ram.mem[1] !== {16'h5A5A, 16'h0000}) begin
+        if (dut.g_dram_ram.s1ram.mem[1] !== {16'h5A5A, 16'h0000}) begin
             err("FW-timeout");
             $display("  result=%h (DRAM[0]) fpc=%h exma_pc=%h mcause=%h mepc=%h priv=%b",
-                     dut.s1ram.mem[0], dut.core0.fpc, dut.core0.exma_pc,
+                     dut.g_dram_ram.s1ram.mem[0], dut.core0.fpc, dut.core0.exma_pc,
                      dut.core0.mcause, dut.core0.mepc, dut.core0.priv);
             int_state();
             dram_dump();
@@ -676,14 +676,14 @@ module tb_fw;
             end
             $finish;
         end
-        if (dut.s1ram.mem[0] === 32'h0) begin
+        if (dut.g_dram_ram.s1ram.mem[0] === 32'h0) begin
             ok("FW-pass");
             $display("  cycles=%0d (reset-release -> marker)", t);
         end
         else begin
             err("FW-result");
             $display("  result=%h mcause=%h mepc=%h priv=%b",
-                     dut.s1ram.mem[0], dut.core0.mcause, dut.core0.mepc,
+                     dut.g_dram_ram.s1ram.mem[0], dut.core0.mcause, dut.core0.mepc,
                      dut.core0.priv);
             int_state();
             dram_dump();

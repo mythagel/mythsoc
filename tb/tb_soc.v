@@ -104,8 +104,8 @@ module tb_soc;
             $display("  state: fpc=%h priv=%b ier=%b eip0=%b ip1=%b ip3=%b msip=%h m5=%h m9=%h m6=%h",
                      dut.core0.fpc, dut.core0.priv, dut.s2uart.ier[0],
                      dut.s4plic.EIP[0], dut.s4plic.ip[0], dut.s4plic.ip[2],
-                     dut.s3clint.msip, dut.s1ram.mem[5], dut.s1ram.mem[9],
-                     dut.s1ram.mem[6]);
+                     dut.s3clint.msip, dut.g_dram_ram.s1ram.mem[5], dut.g_dram_ram.s1ram.mem[9],
+                     dut.g_dram_ram.s1ram.mem[6]);
             $display("  %0s", label);
         end
     endtask
@@ -134,7 +134,7 @@ module tb_soc;
         t = 0;
         while (m9_seen == 0 && t < 200000) begin
             @(posedge clk);
-            if (dut.s1ram.mem[9] === 32'h1) m9_seen = 1;
+            if (dut.g_dram_ram.s1ram.mem[9] === 32'h1) m9_seen = 1;
             t = t + 1;
         end
         if (m9_seen == 0) begin err("SOC-p1-stuck"); dump_state("after-rx"); end
@@ -145,7 +145,7 @@ module tb_soc;
         t = 0;
         while (sent == 0 && t < 400000) begin
             @(posedge clk);
-            if (dut.s1ram.mem[5] === 32'hdeadbeef) sent = 1;
+            if (dut.g_dram_ram.s1ram.mem[5] === 32'hdeadbeef) sent = 1;
             t = t + 1;
         end
         if (sent == 0) begin
@@ -156,37 +156,37 @@ module tb_soc;
 
         // boot phase: DRAM words 0..5
         for (i = 0; i < 6; i = i + 1) begin
-            if (dut.s1ram.mem[i] !== mexp[i])
-                $display("  dram[%0d] got %h exp %h", i, dut.s1ram.mem[i], mexp[i]);
+            if (dut.g_dram_ram.s1ram.mem[i] !== mexp[i])
+                $display("  dram[%0d] got %h exp %h", i, dut.g_dram_ram.s1ram.mem[i], mexp[i]);
         end
-        if (dut.s1ram.mem[0] !== mexp[0]) err("SOC-dram0-ld");
+        if (dut.g_dram_ram.s1ram.mem[0] !== mexp[0]) err("SOC-dram0-ld");
         else ok("SOC-dram0-ld");
-        if (dut.s1ram.mem[1] !== mexp[1]) err("SOC-dram1-lduse");
+        if (dut.g_dram_ram.s1ram.mem[1] !== mexp[1]) err("SOC-dram1-lduse");
         else ok("SOC-dram1-lduse");
-        if (dut.s1ram.mem[2] !== mexp[2]) err("SOC-dram2-mul");
+        if (dut.g_dram_ram.s1ram.mem[2] !== mexp[2]) err("SOC-dram2-mul");
         else ok("SOC-dram2-mul");
-        if (dut.s1ram.mem[3] !== mexp[3]) err("SOC-dram3-div");
+        if (dut.g_dram_ram.s1ram.mem[3] !== mexp[3]) err("SOC-dram3-div");
         else ok("SOC-dram3-div");
-        if (dut.s1ram.mem[4] !== mexp[4]) err("SOC-dram4-sum");
+        if (dut.g_dram_ram.s1ram.mem[4] !== mexp[4]) err("SOC-dram4-sum");
         else ok("SOC-dram4-sum");
-        if (dut.s1ram.mem[5] !== mexp[5]) err("SOC-dram5-sentinel");
+        if (dut.g_dram_ram.s1ram.mem[5] !== mexp[5]) err("SOC-dram5-sentinel");
         else ok("SOC-dram5-sentinel");
 
         // peripheral phases
-        if (dut.s1ram.mem[6] !== 32'h0000002A) err("SOC-rx1-byte");
+        if (dut.g_dram_ram.s1ram.mem[6] !== 32'h0000002A) err("SOC-rx1-byte");
         else ok("SOC-rx1-byte");
-        if (dut.s1ram.mem[8] !== 32'h0000005A) err("SOC-loop-echo");
+        if (dut.g_dram_ram.s1ram.mem[8] !== 32'h0000005A) err("SOC-loop-echo");
         else ok("SOC-loop-echo");
-        if (dut.s1ram.mem[9] !== 32'h3) err("SOC-irq-cnt");   // uart,echo,msip
+        if (dut.g_dram_ram.s1ram.mem[9] !== 32'h3) err("SOC-irq-cnt");   // uart,echo,msip
         else ok("SOC-irq-cnt");
-        if (dut.s1ram.mem[10] !== 32'h1) err("SOC-msip-done");
+        if (dut.g_dram_ram.s1ram.mem[10] !== 32'h1) err("SOC-msip-done");
         else ok("SOC-msip-done");
-        if (!(dut.s1ram.mem[7] > 32'h0 && dut.s1ram.mem[11] > dut.s1ram.mem[7]))
+        if (!(dut.g_dram_ram.s1ram.mem[7] > 32'h0 && dut.g_dram_ram.s1ram.mem[11] > dut.g_dram_ram.s1ram.mem[7]))
             err("SOC-mtime-mono");
         else ok("SOC-mtime-mono");
-        if (dut.s1ram.mem[12] !== 32'h8000000B) err("SOC-mcause");
+        if (dut.g_dram_ram.s1ram.mem[12] !== 32'h8000000B) err("SOC-mcause");
         else ok("SOC-mcause");
-        if (!(dut.s1ram.mem[13] > 32'h0 && dut.s1ram.mem[13] <= 32'h8000))
+        if (!(dut.g_dram_ram.s1ram.mem[13] > 32'h0 && dut.g_dram_ram.s1ram.mem[13] <= 32'h8000))
             err("SOC-mepc");
         else ok("SOC-mepc");
 

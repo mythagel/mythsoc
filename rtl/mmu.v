@@ -354,8 +354,19 @@ module mmu (
     end
 
     // ------------------------------------------------------------- update
+    // SYNCHRONOUS reset process: this block drives the TLB storage arrays
+    // (l1_*/l2_*). Yosys maps any array written inside an async-reset
+    // process to a plain register list ("Replacing memory ... with list of
+    // registers" -- the array never becomes a $mem, so memory_map/BRAM
+    // options are lost and the warning pollutes the board build). A single
+    // dedicated sequential process, nonblocking-only (Cummings SNUG-2000
+    // G1/G4/G6), written under posedge clk only, infers proper $mems.
+    // Reset-window behavior is unchanged for every consumer: all TBs and
+    // the board POR hold rst across >=2 rising edges (arrays are cold well
+    // before release); lookups are state-gated, so X/clear pre-edge is
+    // never sampled.
     integer i;
-    always @(posedge clk or posedge rst) begin
+    always @(posedge clk) begin
         if (rst) begin
             st <= S_IDLE;
             PA_O <= 32'h0;
