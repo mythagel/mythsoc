@@ -51,7 +51,9 @@ module l1_i #(
     wire [LB-1:0] idx = PA_I[LB+1:2];
     wire          hit = v[idx] && (tag[idx] == PA_I[31:LB+2]);
 
-    assign STB_O = (st == W_W1S);
+    assign STB_O = !rst && (st == W_W1S);   // !rst: sync-reset conversion
+                                            // (a held-reset cache must not
+                                            // present STB mid-miss -- I8)
     assign SEL_O = 4'b1111;
     assign WE_O  = 1'b0;
     assign ADR_O = adr_r;

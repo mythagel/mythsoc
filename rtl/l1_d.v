@@ -69,7 +69,9 @@ module l1_d #(
     wire        cacheable = (PA_I[31:22] == 10'h200) || (PA_I[31:22] == 10'h000);
     wire       hit = cacheable && v[idx] && (tag[idx] == PA_I[31:LB+2]);
 
-    assign STB_O = (st == W_W1S);
+    assign STB_O = !rst && (st == W_W1S);   // !rst: sync-reset conversion
+                                            // (no STB while held in reset --
+                                            // mirrors l1_i I8 rationale)
     assign SEL_O = (st == W_W1S) && wen_r ? sel_r : 4'b1111;
     assign WE_O  = (st == W_W1S) && wen_r;
     assign ADR_O = adr_r;

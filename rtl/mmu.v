@@ -246,7 +246,10 @@ module mmu (
     // ------------------------------------------------------------- PTE addrs
     wire [33:0] a1  = {12'b0, satp_r[21:0], 12'b0} + {22'b0, va_r[31:22], 2'b0};
     wire [33:0] a2c = {12'b0, DAT_I[31:10], 12'b0} + {22'b0, va_r[21:12], 2'b0};
-    assign STB_O = (st == S_W1S) || (st == S_W2S);
+    assign STB_O = !rst && ((st == S_W1S) || (st == S_W2S));  // !rst: sync-
+    // reset conversion (mirrors l1_i/l1_d: a held-reset walker presents no
+    // m2 read; S_IDLE is also the reset state, so this only gates the
+    // abort-mid-miss window)
     assign SEL_O = 4'b1111;
     assign WE_O  = 1'b0;
     assign ADR_O = (st == S_W1S) ? a1[31:0] : pte0a_r;
